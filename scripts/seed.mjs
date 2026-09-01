@@ -1,5 +1,15 @@
 #!/usr/bin/env node
-// Seed 本地 D1:24h 假数据 + 1 个授权设备
+// ⚠️  DEPRECATED — 本地预览请用 `npm run db:pull`(拉远程 D1 真实数据)。
+//
+// 假数据(6 个固定 sub momo-A/B big-A/B stl-A/B、确定性失败序列)只能验证
+// happy path,不能暴露真实 OnePlus 设备的渲染/性能/边界问题。所有本地预览、
+// UI 验证、回归测试都应该用 db:pull 拉下来的真数据。
+//
+// 此脚本保留仅供以下情况:
+//   - 离线开发(没有 wrangler 远程访问权限)
+//   - 写前端组件原型、不需要真数据时
+//   - 给 README 截图提供"看起来有东西"的数据
+//
 // 用法:
 //   DEVICE_UUID=<你的设备 UUID> DEVICE_NAME=MyPhone npm run db:seed
 // 例:

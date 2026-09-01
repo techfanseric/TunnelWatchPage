@@ -9,8 +9,9 @@
     "db:migrate:billing": "wrangler d1 execute tunnelwatch --local --file=migrations/0002_billing.sql",
     "db:migrate:filter-share": "wrangler d1 execute tunnelwatch --local --file=migrations/0003_bill_share_filters.sql",
     "db:seed": "node scripts/seed.mjs",
+    "db:pull": "node scripts/pull-remote.mjs",
     "db:query": "wrangler d1 execute tunnelwatch --local --command",
-    "db:reset": "rm -rf .wrangler/state && npm run db:init && npm run db:migrate:billing && npm run db:migrate:filter-share && npm run db:seed"
+    "db:reset": "rm -rf .wrangler/state && npm run db:init && npm run db:migrate:billing && npm run db:migrate:filter-share && npm run db:pull"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240919.0",
