@@ -6,11 +6,12 @@ const width = parseInt(process.argv[4] || '1400', 10);
 const after = process.argv[5]; // optional: '24h' | '7d' | '30d'
 const fullPage = process.argv[6] !== 'false';
 const timeout = parseInt(process.argv[7] || '15000', 10);
+const height = parseInt(process.argv[8] || '900', 10);
 
 const browser = await chromium.launch({
   executablePath: '/Users/ericyim/Library/Caches/ms-playwright/chromium-1234/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
 });
-const ctx = await browser.newContext({ viewport: { width, height: 900 } });
+const ctx = await browser.newContext({ viewport: { width, height } });
 const page = await ctx.newPage();
 page.on('pageerror', e => console.error('PAGEERROR:', e.message));
 page.on('console', m => { if (m.type() === 'error') console.error('CONSOLE-ERR:', m.text()); });

@@ -128,15 +128,118 @@ Response: `{ id, device, deviceName, kind, ts, summary, payload }`
 
 Response: `{ device, hours, kind, items: [{ id, ts, kind, summary }, ...] }`
 
-## 部署到 page.dev(待办)
+## 部署到 page.dev
 
-1. `wrangler login` 登录 Cloudflare
-2. `wrangler d1 create tunnelwatch` 创建远程 D1,把输出的 `database_id` 填进 `wrangler.toml`
-3. `wrangler d1 execute tunnelwatch --remote --file=migrations/0001_init.sql` 跑 schema
-4. 在 App 设置页复制设备 UUID,跑:
-   `wrangler d1 execute tunnelwatch --remote --command "INSERT INTO devices (uuid, name) VALUES ('<uuid>', 'MyPhone')"`
-5. `wrangler pages deploy public --project-name=tunnelwatch` 部署
-6. 把 `~/TunnelWatch/local.properties` 的 `tw.telemetry.url` 改成 `https://<project>.page.dev`,重建装机
+把 `functions/api/ingest` 暴露到公网,让 App 不再依赖 `adb reverse`,实现"不碰手机"也能静默上传。
+
+### 0. 前置
+
+- Cloudflare 账号(免费层即可,D1 + Pages 都含)
+- `cd ~/TunnelWatchPage && npm install` 装好 wrangler
+
+### 1. 登录 + 创建远程 D1
+
+```bash
+# 1.1 登录
+npx wrangler login
+# 浏览器跳出来授权
+
+# 1.2 建远程 D1(会输出 database_id)
+npx wrangler d1 create tunnelwatch
+# 把输出的 database_id 复制下来,填进 wrangler.toml:
+#   [[d1_databases]]
+#   binding = "DB"
+#   database_name = "tunnelwatch"
+#   database_id = "xxxx-xxxx-xxxx-xxxx"
+
+# 1.3 在远程 D1 跑 schema
+npx wrangler d1 execute tunnelwatch --remote --file=migrations/0001_init.sql
+```
+
+### 2. 部署 Pages
+
+```bash
+npx wrangler pages deploy public --project-name=tunnelwatch
+# 部署成功后输出:
+# ✨ Deployment complete! Take a peek over at https://<random-hash>.tunnelwatch.pages.dev
+```
+
+> 第一次部署前 `wrangler` 可能要求在 Cloudflare Dashboard 创建 Pages project,
+> 或者直接用 `wrangler pages project create tunnelwatch` 提前建。
+
+### 3. 注册设备 UUID 到远程 D1
+
+每台手机/平板的 UUID 必须在远程 `devices` 白名单里,`/api/ingest` 才会接收。
+
+```bash
+# 3.1 从手机读 UUID
+ADB=/opt/homebrew/share/android-commandlinetools/platform-tools/adb
+$ADB shell run-as tech.tunnelwatch.app cat shared_prefs/tw_device_identity.xml \
+  | grep -oE '<string name="uuid">[^<]+' | sed 's/.*>//'
+# 输出形如: 69af700e-0242-4d1a-acd6-9e9ff802f2bd
+
+# 3.2 写入远程 D1
+npx wrangler d1 execute tunnelwatch --remote --command \
+  "INSERT INTO devices (uuid, name) VALUES ('<uuid>', '<设备名如 OnePlus PHK110>')"
+
+# 3.3 验证
+npx wrangler d1 execute tunnelwatch --remote --command "SELECT * FROM devices"
+```
+
+### 4. App 端切到公网 URL
+
+```bash
+# 编辑 ~/TunnelWatch/local.properties
+# 把:
+#   tw.telemetry.url=http://localhost:8788
+# 改成:
+tw.telemetry.url=https://<your-project>.pages.dev
+```
+
+> 改完本地 dev 也可以继续用:wrangler `pages dev` 会在本地 8788 监听,
+> 但 App 端这时打的是公网,要走公网回路。本地开发继续测的话**临时改回** `http://localhost:8788` + `adb reverse`。
+
+### 5. 重新构建 + 装机 + 触发首次上传
+
+```bash
+cd ~/TunnelWatch
+export ANDROID_HOME=/opt/homebrew/share/android-commandlinetools
+./gradlew :app:assembleDebug
+
+$ADB install -r app/build/outputs/apk/debug/app-debug.apk
+$ADB shell am force-stop tech.tunnelwatch.app
+$ADB shell am start -n tech.tunnelwatch.app/.MainActivity
+# 打开 App 等 5 秒(FULL 上传),或点 widget 触发(PROBE 上传)
+```
+
+### 6. 验证
+
+- App 端 `tw_device_identity.xml` 应出现 `last_upload_ok=true` + `last_upload_detail=HTTP 200`
+- 远程 D1 应有新行:
+  ```bash
+  npx wrangler d1 execute tunnelwatch --remote --command \
+    "SELECT device_name, kind, ts FROM snapshots ORDER BY ts DESC LIMIT 4"
+  ```
+- 公网 `GET https://<your-project>.pages.dev/api/devices` 返回 JSON 白名单
+
+### 部署后的工作模式
+
+| 触发源 | 周期 | 是否需要 USB 连 Mac? |
+|---|---|---|
+| Widget onUpdate | 系统 30min | ❌ |
+| WorkManager `LineProbeWorker` | 15min(best-effort) | ❌ |
+| 打开 App / 点 widget | 用户行为 | ❌ |
+
+**只要手机能上网 + widget 已加到桌面,30min 一次的 PROBE 就能自动喂饱 page.dev。**
+本地 dev 模式(localhost:8788 + adb reverse)只在 Mac 直连调试时使用。
+
+### 重新发布(改了 `functions/` 或 `public/` 后)
+
+```bash
+cd ~/TunnelWatchPage
+npx wrangler pages deploy public --project-name=tunnelwatch
+# 几十秒完成,公网 URL 不会变
+```
 
 ## License
 
