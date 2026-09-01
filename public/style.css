@@ -682,6 +682,36 @@ body.is-share-mode .brand h1 { font-size: 16px; }
   height: 240px;
 }
 
+/* ---------- Chart skeleton (loading placeholder) ----------
+   默认覆盖在 canvas 上做"鱼骨"占位,shimmer 动画。chart 第一次渲染完成后,
+   由 chartUpdate 给 .chart-wrap 加上 .is-loaded,这里淡出消失。 */
+.chart-skeleton {
+  position: absolute;
+  inset: 0;
+  border-radius: 8px;
+  background: linear-gradient(
+    90deg,
+    var(--border) 0%,
+    rgba(229, 231, 235, 0.45) 40%,
+    var(--border) 80%
+  );
+  background-size: 200% 100%;
+  animation: chart-skeleton-shimmer 1.4s ease-in-out infinite;
+  pointer-events: none;
+  opacity: 1;
+  transition: opacity 0.25s ease;
+}
+.chart-wrap.is-loaded .chart-skeleton {
+  opacity: 0;
+}
+@keyframes chart-skeleton-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chart-skeleton { animation: none; }
+}
+
 /* ---------- Region card list ---------- */
 .region-list {
   display: flex;

@@ -10,7 +10,7 @@ import { geoNaturalEarth1, geoPath } from 'd3-geo';
 const REFRESH_MS = 60_000;
 // 发版标签 — 每次 `wrangler pages deploy` 前手动 bump 一下,刷新页面看 header 是否更新 → 确认 deploy 生效
 // 格式:YYYY.MM.DD-HHMM(本地时间),不需要严格 semver,关键是要"每次发版都换字符串"
-const APP_VERSION = '2026.09.01-2152';
+const APP_VERSION = '2026.09.01-2250';
 // 世界地图 TopoJSON 来源(importmap 把 d3-geo/topojson-client 解析到 jsdelivr ESM,JSON 走 fetch 避免 MIME 限制)
 const WORLD_TOPO_URL = '/vendor/world-50m.json';
 // Chart.js 不解析 CSS var(),要写 hex
@@ -220,7 +220,8 @@ function wireRegionSortSwitcher() {
       b.classList.toggle('active', active);
       b.setAttribute('aria-selected', active ? 'true' : 'false');
     });
-    renderRegionCard();
+    // 切排序不需要重拉数据;force=true 跳过 === 早退,保证 304 命中时也能重渲 DOM
+    renderRegionCard({ force: true });
   });
 }
 
@@ -239,7 +240,8 @@ function wireRenewalSortSwitcher() {
       b.classList.toggle('active', active);
       b.setAttribute('aria-selected', active ? 'true' : 'false');
     });
-    renderRenewalCard();
+    // 切排序不需要重拉数据;force=true 跳过 === 早退,保证 304 命中时也能重渲 DOM
+    renderRenewalCard({ force: true });
   });
 }
 
@@ -448,7 +450,7 @@ function setMirrorEmpty(msg) {
 
 // ---------- 按地区 卡片(PRIMARY · 合并"地区平衡 + 节点按地区") ----------
 // 同一组 regionStats,一个排序状态,左右两段:ring chart + region info + 最快/最慢
-async function renderRegionCard() {
+async function renderRegionCard({ force = false } = {}) {
   try {
     let data;
     try {
@@ -458,8 +460,8 @@ async function renderRegionCard() {
       document.getElementById('region-list').innerHTML = empty;
       return false;
     }
-    if (data === lastDataRef.region) {
-      return false;  // 数据未变 → 跳过整个 region-list innerHTML 重建(保留用户选中的 region row)
+    if (!force && data === lastDataRef.region) {
+      return false;  // 数据未变 + 不强制 → 跳过整个 region-list innerHTML 重建(保留用户选中的 region row)
     }
     lastDataRef.region = data;
     const s = data.summary || {};
@@ -631,22 +633,115 @@ async function renderProtocolChart() {
   }
 }
 
-// ---------- 续费建议榜(PRIMARY) ----------
-async function renderRenewalCard() {
+// ---------- 续费建议榜(PRIMARY) — 客户端按时间窗聚合算分 ----------
+// 综合分公式(对齐 agent 端 computeSubscriptionScores @ TelemetryPublisher.kt):
+//   可用率 40%   p50 / 价值 15% / 覆盖面 10% / 稳定性 10%
+// 不同点:可用率 + 稳定性 改用 history items 时间窗聚合,而不是"当下"。
+//   - 可用率 40%   ← time-window mean(subLineStats[sub].ok / total)
+//   - 稳定性 10%   ← 1 - mean(okRate) 过去一段时间的失败率
+//   - 性能 25% / 价值 15% / 覆盖面 10% 取最新 snapshot 的值(节点结构/网络近况,不适合跨窗聚合)
+// sub 的元数据(sub / flag / expireAtMillis / daysToExpire / uniqueValue / nodeCount / regionCount / p50)
+// 都从最新 snapshot 的 subscriptionScores 透传,保持显示一致。
+function computeRenewalScoresFromHistory(items, rangeHours) {
+  if (!items || items.length === 0) return [];
+  // 1. 收集时间窗内每个 subUrl 的 okRate 序列 + 锁定"最新 FULL snapshot"作为元数据源
+  const series = new Map();  // subUrl -> okRates: number[]
+  let latestSummary = null;
+  let latestTs = 0;
+  for (const it of items) {
+    if (it.kind !== 'full') continue;
+    const s = it.summary || {};
+    const subStats = s.subLineStats || {};
+    if (Object.keys(subStats).length === 0) continue;
+    if (it.ts > latestTs) {
+      latestTs = it.ts;
+      latestSummary = s;
+    }
+    for (const [url, st] of Object.entries(subStats)) {
+      const total = st.total || 0;
+      const ok = st.ok || 0;
+      if (total <= 0) continue;
+      if (!series.has(url)) series.set(url, []);
+      series.get(url).push(ok / total);
+    }
+  }
+  if (!latestSummary) return [];
+  const latestScores = latestSummary.subscriptionScores || [];
+  if (latestScores.length === 0) return [];
+  const metaByUrl = new Map(latestScores.map(sc => [sc.subUrl, sc]));
+  if (metaByUrl.size === 0) return [];
+  // 2. 算每个 sub 的新 score
+  const out = [];
+  for (const [url, okRates] of series) {
+    const meta = metaByUrl.get(url);
+    if (!meta) continue;  // 最新 snapshot 已不含这个 sub,跳过
+    // 时间窗聚合:可用率 / 稳定性
+    const meanOkRate = okRates.reduce((a, b) => a + b, 0) / okRates.length;
+    const meanFailRate = 1 - meanOkRate;
+    // 节点结构取最新 snapshot(原 agent 公式语义:line probe 延迟、节点数、地区数)
+    const p50 = meta.p50;
+    const total = meta.nodeCount || 0;
+    const regionCount = meta.regionCount || 0;
+    // 可用率 40% — 历史
+    const scoreAvailability = meanOkRate * 100;
+    // 性能 25% — 跟 agent 公式一致:p50<100ms 100,>500ms 0,线性内插;无样本给 50
+    const scorePerformance = (p50 == null) ? 50.0
+      : p50 < 100 ? 100.0
+      : p50 > 500 ? 0.0
+      : 100.0 - ((p50 - 100) / 400) * 100;
+    // 价值 15%
+    const scoreValue = Math.min(total / 100, 1) * 100;
+    // 覆盖面 10%
+    const scoreCoverage = Math.min(regionCount / 8, 1) * 100;
+    // 稳定性 10% — 历史
+    const scoreStability = meanFailRate < 0.05 ? 100
+      : meanFailRate > 0.30 ? 0
+      : 100 - ((meanFailRate - 0.05) / 0.25) * 100;
+    const raw = scoreAvailability * 0.40
+      + scorePerformance * 0.25
+      + scoreValue * 0.15
+      + scoreCoverage * 0.10
+      + scoreStability * 0.10;
+    const score = Math.max(0, Math.min(100, Math.round(raw)));
+    const recommend = score >= 70 ? 'renew' : score >= 50 ? 'consider' : 'replace';
+    out.push({
+      sub: meta.sub,
+      subUrl: url,
+      score,
+      recommend,
+      okRate: meanOkRate,            // 覆盖 agent 的"当下值",显示用时间窗均值
+      p50,
+      nodeCount: total,
+      regionCount,
+      failRate24h: meanFailRate,     // 字段名保持兼容(原意为"过去一段时间的 fail 率",现在真的是了)
+      expireAtMillis: meta.expireAtMillis,
+      daysToExpire: meta.daysToExpire,
+      uniqueValue: meta.uniqueValue || [],
+      // 给 hint 文案用
+      _buckets: okRates.length,
+    });
+  }
+  return out;
+}
+
+async function renderRenewalCard({ force = false } = {}) {
   try {
-    let data;
+    let items;
     try {
-      ({ data } = await fetchJSON(`/api/latest?device=${currentDevice}&kind=probe`));
+      // 改用 /api/history(hours=currentHours),score 跟时间窗走
+      // 与 renderCharts 共享 fetchJSON 的 URL 缓存,同 URL 自动 dedup
+      const entry = await fetchJSON(`/api/history?device=${currentDevice}&hours=${currentHours}`);
+      items = entry.data.items;
     } catch (e) {
       const empty = e.message.includes('404') ? '— 暂无数据 —' : '<span class="empty">加载失败: ' + e.message + '</span>';
       document.getElementById('renewal-list').innerHTML = empty;
       return false;
     }
-    if (data === lastDataRef.renewal) {
-      return false;  // 续费榜快照未变 → 跳过整张表的 innerHTML 重建
+    if (!force && items === lastDataRef.renewal) {
+      return false;  // 续费榜快照未变 + 不强制 → 跳过整张表的 innerHTML 重建
     }
-    lastDataRef.renewal = data;
-    const scores = data.summary?.subscriptionScores || [];
+    lastDataRef.renewal = items;
+    const scores = computeRenewalScoresFromHistory(items, currentHours);
     if (scores.length === 0) {
       document.getElementById('renewal-list').innerHTML = '<span class="empty">— 该设备未上传续费数据 —</span>';
       return false;
@@ -678,9 +773,10 @@ async function renderRenewalCard() {
     // 切换 tab 时同步右侧 hint 文案
     const hint = document.getElementById('renewal-hint');
     if (hint) {
+      const label = HOURS_LABEL[currentHours] || '24h';
       hint.textContent = currentRenewalSort === 'score'
-        ? '推荐高 · 综合分降序 · 实时(最新快照)'
-        : '快到期 · 到期天数升序 · 实时(最新快照)';
+        ? `推荐高 · 综合分降序 · ${label} 聚合`
+        : `快到期 · 到期天数升序 · ${label} 聚合`;
     }
     document.getElementById('renewal-list').innerHTML = sortedScores.map(s => {
       const score = s.score ?? 0;
