@@ -401,7 +401,7 @@
           <h2>节点按协议</h2>
           <span class="chart-hint">当前快照</span>
         </div>
-        <div class="chart-wrap"><canvas id="chart-protocol"></canvas></div>
+        <div class="chart-wrap"><div class="chart-skeleton" aria-hidden="true"></div><canvas id="chart-protocol"></canvas></div>
       </section>
 
       <!-- 24h 趋势图(监测的核心价值) -->
@@ -410,7 +410,7 @@
           <h2 data-hours-title="{H} 节点 OK 率">{H} 节点 OK 率</h2>
           <span class="chart-hint">按账号分组,百分比</span>
         </div>
-        <div class="chart-wrap"><canvas id="chart-ok-rate"></canvas></div>
+        <div class="chart-wrap"><div class="chart-skeleton" aria-hidden="true"></div><canvas id="chart-ok-rate"></canvas></div>
       </section>
 
       <section class="chart-card">
@@ -418,7 +418,7 @@
           <h2 data-hours-title="{H} 节点延迟">{H} 节点延迟</h2>
           <span class="chart-hint">全量延迟分位 p15 / p50 / p95 / p99 (ms)</span>
         </div>
-        <div class="chart-wrap"><canvas id="chart-latency"></canvas></div>
+        <div class="chart-wrap"><div class="chart-skeleton" aria-hidden="true"></div><canvas id="chart-latency"></canvas></div>
       </section>
 
       <section class="chart-card">
@@ -426,7 +426,7 @@
           <h2 data-hours-title="{H} 节点延迟 p50">{H} 节点延迟 p50</h2>
           <span class="chart-hint">按地区分组 (ms)</span>
         </div>
-        <div class="chart-wrap"><canvas id="chart-region-latency"></canvas></div>
+        <div class="chart-wrap"><div class="chart-skeleton" aria-hidden="true"></div><canvas id="chart-region-latency"></canvas></div>
       </section>
 
       <section class="chart-card">
@@ -434,35 +434,27 @@
           <h2 data-hours-title="{H} 订阅源 OK 率">{H} 订阅源 OK 率</h2>
           <span class="chart-hint">按订阅源分组,百分比</span>
         </div>
-        <div class="chart-wrap"><canvas id="chart-sub-ok-rate"></canvas></div>
+        <div class="chart-wrap"><div class="chart-skeleton" aria-hidden="true"></div><canvas id="chart-sub-ok-rate"></canvas></div>
       </section>
 
       <section class="chart-card">
         <div class="chart-card-head">
           <h2 data-hours-title="{H} 订阅源连通性">{H} 订阅源连通性</h2>
           <div class="chart-head-right">
-            <span class="chart-hint" data-hint="sub-conn"></span>
-            <div class="seg-toggle" role="tablist" data-toggle="sub-conn" aria-label="订阅源连通性视图切换">
-              <button type="button" role="tab" data-view="snapshot" aria-selected="true">最新快照</button>
-              <button type="button" role="tab" data-view="trend" aria-selected="false">时间趋势</button>
-            </div>
+            <span class="chart-hint">每订阅源失败节点数随时间变化</span>
           </div>
         </div>
-        <div class="chart-wrap"><canvas id="chart-sub-conn"></canvas></div>
+        <div class="chart-wrap"><div class="chart-skeleton" aria-hidden="true"></div><canvas id="chart-sub-conn"></canvas></div>
       </section>
 
       <section class="chart-card">
         <div class="chart-card-head">
           <h2 data-hours-title="{H} 失败节点数">{H} 失败节点数</h2>
           <div class="chart-head-right">
-            <span class="chart-hint" data-hint="fail-count"></span>
-            <div class="seg-toggle" role="tablist" data-toggle="fail-count" aria-label="失败节点数视图切换">
-              <button type="button" role="tab" data-view="snapshot" aria-selected="true">最新快照</button>
-              <button type="button" role="tab" data-view="trend" aria-selected="false">时间趋势</button>
-            </div>
+            <span class="chart-hint">各地区失败节点数随时间变化(估算)</span>
           </div>
         </div>
-        <div class="chart-wrap"><canvas id="chart-fail-count"></canvas></div>
+        <div class="chart-wrap"><div class="chart-skeleton" aria-hidden="true"></div><canvas id="chart-fail-count"></canvas></div>
       </section>
 
       <section class="chart-card">
@@ -470,7 +462,7 @@
           <h2 data-hours-title="{H} 流量速率">{H} 流量速率</h2>
           <span class="chart-hint" data-bucket-hint>每 {B} 增量 (GB)</span>
         </div>
-        <div class="chart-wrap"><canvas id="chart-traffic-rate"></canvas></div>
+        <div class="chart-wrap"><div class="chart-skeleton" aria-hidden="true"></div><canvas id="chart-traffic-rate"></canvas></div>
       </section>
 
       <section class="chart-card">
@@ -478,7 +470,7 @@
           <h2 data-hours-title="{H} 流量变化">{H} 流量变化</h2>
           <span class="chart-hint">已用 / 总量 (GB)</span>
         </div>
-        <div class="chart-wrap"><canvas id="chart-traffic"></canvas></div>
+        <div class="chart-wrap"><div class="chart-skeleton" aria-hidden="true"></div><canvas id="chart-traffic"></canvas></div>
       </section>
 
       </div>

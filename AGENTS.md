@@ -24,17 +24,18 @@ TunnelWatch 的可视化端,Cloudflare Pages + D1 部署。Agent 端(Android,不
 
 `db:seed` 只在**离线 / 无 wrangler 远程权限 / 给截图补点数据**时用,且要在 PR/commit message 里说明。
 
-### 2. 默认时间趋势
+### 2. 订阅源连通性 / 失败节点数只有时间趋势
 
-`chart-sub-conn` 和 `chart-fail-count` 两张图默认 tab = `trend`(时间趋势,折线)。`VIEW_STORAGE_KEY = 'tw.chartView.v2'`(升 key 强制所有用户重置到新默认)。snapshot tab 还在,只是不默认。
+两张图都是 X=时间的折线图,没有"最新快照"切换。**最新快照(X=订阅源的堆叠柱状图)没意义**:
+- 一张快照看不出"变化"或"趋势",暴露不了真实问题
+- 节点健康度直接看 `chart-sub-ok-rate` 更准
+- 一眼数得清 6 个 sub 的 OK 数,不需要堆叠
 
-### 3. 堆叠柱状图布局对称
+如果未来要恢复 snapshot,要先在 AGENTS.md / PR 里证明它能带来"快照"这个时间维度看不出的信息维度,否则不要加回去。
 
-两张图 snapshot 都是 X=订阅源 / stack=地区:
-- 订阅源连通性:堆 **OK 节点数**(`buildSubRegionOks` 估算)
-- 失败节点数:堆 **失败节点数**(`buildSubRegionFailures`,优先 `subRegionFailStats` 精确字段)
+### 3. (已合并到 2)
 
-地区颜色在两张图里一致(CHART_PALETTE),方便对照。
+原"堆叠柱状图布局对称"约定随 snapshot 删除而废止,不再适用。
 
 ## 命令速查
 

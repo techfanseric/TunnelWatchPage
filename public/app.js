@@ -35,26 +35,11 @@ let currentDevice = null;     // uuid
 let currentHours = 24;        // 时间窗:24 / 168 / 720(24h / 7d / 30d)
 let currentRegionSort = 'count';    // 按地区 排序:'count' 充裕在前(节点数降序) / 'latency' ⚡延迟快(p50 升序)
 let currentRenewalSort = 'expiry';  // 续费建议榜 排序:'expiry' 快到期(到期天数升序) / 'score' 推荐高(综合分降序)
-// 订阅源连通性 / 失败节点数 两张图各支持两种视图:
-//   snapshot — x=订阅源,堆叠柱状图
-//              连通性:每根柱按"地区"堆叠 OK 节点数(绿色基调,看 OK 分布)
-//              失败节点:每根柱按"地区"堆叠失败节点数(红色基调,看失败分布)
-//   trend    — x=时间,折线看趋势(连通性:每订阅源一条线;失败节点:每地区一条线)
-// 两张图 snapshot 完全对称(同布局,堆叠维度都是地区,只是堆的内容 OK/失败相反)
-// 默认 trend(用户偏好:打开就看时间趋势,需要"最新快照"时再手动切)
-const VIEW_STORAGE_KEY = 'tw.chartView.v2';  // v2:默认值 trend;旧 v1 用户升级时重置
-function loadViewPrefs() {
-  try {
-    const raw = localStorage.getItem(VIEW_STORAGE_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch { return {}; }
-}
-function saveViewPrefs(prefs) {
-  try { localStorage.setItem(VIEW_STORAGE_KEY, JSON.stringify(prefs)); } catch {}
-}
-const viewPrefs = loadViewPrefs();
-let subConnView = viewPrefs.subConn || 'trend';     // 'snapshot' | 'trend'
-let failCountView = viewPrefs.failCount || 'trend'; // 'snapshot' | 'trend'
+// 订阅源连通性 / 失败节点数 两张图固定为"时间趋势"折线图:
+//   连通性  — x=时间,每订阅源一条线(每 sub 的失败节点数随时间变化)
+//   失败节点 — x=时间,各地区一条线(各 region 失败节点数随时间变化)
+// 不再提供"最新快照"切到堆叠柱状图的选项:节点健康度直接看 chart-sub-ok-rate 更准,
+// 一张快照看不出"变化"也暴露不了真实问题。
 let charts = {
   okRate: null, subOkRate: null, traffic: null, latency: null,
   subConn: null, regionLatency: null, protocol: null,
@@ -179,9 +164,7 @@ async function init() {
   wireViewSwitcher();
   wireRegionSortSwitcher();
   wireRenewalSortSwitcher();
-  wireChartToggles();
   syncViewSwitcherActive();   // URL 参数 / default 同步到按钮高亮
-  syncChartTogglesActive();
   updateChartTitles();   // 初始化时就把 {H} 占位符替换掉(默认 24h)
   updateBucketHint(HOURS_BUCKET_MIN[currentHours] || 15);
   // 把发版标签塞进 header 右侧(确认 deploy 生效用)
@@ -219,52 +202,6 @@ function wireViewSwitcher() {
     // hours 变了 → history URL 变了,清掉旧 hours 的 lastDataRef(让新 hours 强制走 200 拉一次)
     lastDataRef.history = null;
     refreshAll();   // refreshAll 末尾会调 renderWorldMapCard(避免重复 fetch)
-  });
-}
-
-// 订阅源连通性 / 失败节点数 两张图卡头的"最新快照 / 时间趋势"切换
-// 切完后:用缓存的 lastHistoryItems 重渲这两张图,不用重新拉 history
-function wireChartToggles() {
-  document.querySelectorAll('.seg-toggle[data-toggle]').forEach(root => {
-    const key = root.dataset.toggle; // 'sub-conn' | 'fail-count'
-    root.addEventListener('click', (e) => {
-      const btn = e.target.closest('button[data-view]');
-      if (!btn) return;
-      const view = btn.dataset.view;
-      if (view !== 'snapshot' && view !== 'trend') return;
-      if (key === 'sub-conn' && view === subConnView) return;
-      if (key === 'fail-count' && view === failCountView) return;
-      if (key === 'sub-conn') subConnView = view;
-      if (key === 'fail-count') failCountView = view;
-      // 持久化
-      viewPrefs.subConn = subConnView;
-      viewPrefs.failCount = failCountView;
-      saveViewPrefs(viewPrefs);
-      // 同步高亮
-      syncChartTogglesActive();
-      // 用缓存重渲两张图(不重新拉 history)
-      const bucketMin = HOURS_BUCKET_MIN[currentHours] || 15;
-      if (lastHistoryItems && lastHistoryItems.length > 0) {
-        if (key === 'sub-conn') drawSubConn(lastHistoryItems, bucketMin);
-        if (key === 'fail-count') drawFailCount(lastHistoryItems, bucketMin);
-      } else {
-        // 没缓存,走全量 refresh
-        refreshAll();
-      }
-    });
-  });
-}
-
-function syncChartTogglesActive() {
-  document.querySelectorAll('.seg-toggle[data-toggle]').forEach(root => {
-    const key = root.dataset.toggle;
-    const cur = key === 'sub-conn' ? subConnView : key === 'fail-count' ? failCountView : null;
-    if (!cur) return;
-    root.querySelectorAll('button[data-view]').forEach(b => {
-      const active = b.dataset.view === cur;
-      b.classList.toggle('active', active);
-      b.setAttribute('aria-selected', active ? 'true' : 'false');
-    });
   });
 }
 
@@ -1018,65 +955,15 @@ function drawRegionLatency(items, bucketMin) {
   });
 }
 
+// 订阅源连通性:X=时间,每订阅源一条折线(每个 sub 的失败节点数随时间变化)
+// OK 比例已由 chart-sub-ok-rate 覆盖,这里只画失败数避免重复
 function drawSubConn(items, bucketMin) {
-  // 两种视图:
-  //   snapshot — x=订阅源,单柱 OK+失败 堆叠,显示"现在每个订阅源的状态"
-  //   trend    — x=时间,每订阅源一条折线,显示"每个订阅源失败数的变化趋势"
-  //              (OK 比例已由 chart-sub-ok-rate 覆盖,这里只画失败数避免重复)
-  if (subConnView === 'snapshot') {
-    drawSubConnSnapshot(items);
-  } else {
-    drawSubConnTrend(items, bucketMin);
-  }
-}
-
-function drawSubConnSnapshot(items) {
-  // 形式:堆叠柱状图,X=订阅源,stack=地区(每段=一个地区的 OK 节点数)
-  // 跟"失败节点数"那张图完全对称 — sub-conn 看 OK 分布,fail-count 看失败分布
-  const latest = pickLatestItem(items);
-  const subList = getSubList(latest?.summary);
-  const hint = document.querySelector('[data-hint="sub-conn"]');
-  if (!latest || subList.length === 0) {
-    if (hint) hint.textContent = '最新快照 · 暂无订阅源';
-    chartUpdate('chart-sub-conn', 'subConn', {
-      type: 'bar',
-      data: { labels: [], datasets: [] },
-      options: chartOpts({ y: { beginAtZero: true, ticks: { stepSize: 1, precision: 0 } } })
-    });
-    return;
-  }
-  const regionOks = buildSubRegionOks(latest.summary, subList);
-  const regionSet = new Set();
-  regionOks.forEach(by => Object.keys(by).forEach(r => regionSet.add(r)));
-  const regionTotals = {};
-  regionOks.forEach(by => Object.entries(by).forEach(([r, n]) => { regionTotals[r] = (regionTotals[r] || 0) + n; }));
-  const regions = [...regionSet].sort((a, b) => (regionTotals[b] || 0) - (regionTotals[a] || 0));
-  if (hint) hint.textContent = '最新快照 · OK 节点按地区分布(估算)';
-  const labels = subList.map(([, flag]) => flag);
-  const datasets = regions.map((region, i) => {
-    const data = subList.map(([url]) => regionOks.get(url)?.[region] || 0);
-    return {
-      label: region, data,
-      backgroundColor: CHART_PALETTE[i % CHART_PALETTE.length],
-      stack: 's', borderRadius: 4,
-    };
-  });
-  chartUpdate('chart-sub-conn', 'subConn', {
-    type: 'bar',
-    data: { labels, datasets },
-    options: chartOpts({ y: { beginAtZero: true, ticks: { stepSize: 1, precision: 0 } } })
-  });
-}
-
-function drawSubConnTrend(items, bucketMin) {
   const byTs = new Map();
   items.forEach(it => {
     if (it.summary?.subLineStats) byTs.set(bucketKey(it.ts, bucketMin), it);
   });
   const series = [...byTs.values()].sort((a, b) => a.ts - b.ts);
   const subList = collectSubsAcrossSeries(series);
-  const hint = document.querySelector('[data-hint="sub-conn"]');
-  if (hint) hint.textContent = '时间趋势 · 每订阅源失败节点数';
   const labels = series.map(it => formatTime(it.ts, currentHours));
   const datasets = subList.map(([url, flag], i) => {
     const data = series.map(it => {
@@ -1099,73 +986,19 @@ function drawSubConnTrend(items, bucketMin) {
   });
 }
 
+// 失败节点数:X=时间,各地区一条折线(各 region 失败节点数随时间变化)
+// 按 regionStats.total 比例估算(精确的 subRegionFailStats 是 per-snapshot 数据,这里不复用)
 function drawFailCount(items, bucketMin) {
-  // 两种视图:
-  //   snapshot — x=订阅源,每根柱按地区堆叠,显示"每个订阅源失败节点的地区分布"
-  //   trend    — x=时间,每地区一条折线,显示"各地区失败节点数随时间的变化"
-  if (failCountView === 'snapshot') {
-    drawFailCountSnapshot(items);
-  } else {
-    drawFailCountTrend(items, bucketMin);
-  }
-}
-
-function drawFailCountSnapshot(items) {
-  const latest = pickLatestItem(items);
-  const subList = getSubList(latest?.summary);
-  const hint = document.querySelector('[data-hint="fail-count"]');
-  if (!latest || subList.length === 0) {
-    if (hint) hint.textContent = '最新快照 · 暂无订阅源';
-    chartUpdate('chart-fail-count', 'failCount', {
-      type: 'bar',
-      data: { labels: [], datasets: [] },
-      options: chartOpts({ y: { beginAtZero: true, ticks: { stepSize: 1, precision: 0 } } })
-    });
-    return;
-  }
-  const regionFails = buildSubRegionFailures(latest.summary, subList);
-  // 选所有出现过的地区(按总失败数降序,稳定排序)
-  const regionSet = new Set();
-  regionFails.forEach(by => Object.keys(by).forEach(r => regionSet.add(r)));
-  const regionTotals = {};
-  regionFails.forEach(by => Object.entries(by).forEach(([r, n]) => { regionTotals[r] = (regionTotals[r] || 0) + n; }));
-  const regions = [...regionSet].sort((a, b) => (regionTotals[b] || 0) - (regionTotals[a] || 0));
-  // 是否使用了精确字段 vs 估算
-  const hasExact = !!latest.summary.subRegionFailStats;
-  if (hint) hint.textContent = hasExact
-    ? '最新快照 · 失败按地区(精确)'
-    : '最新快照 · 失败按地区(估算)';
-  const labels = subList.map(([, flag]) => flag);
-  const datasets = regions.map((region, i) => {
-    const data = subList.map(([url]) => regionFails.get(url)?.[region] || 0);
-    return {
-      label: region, data,
-      backgroundColor: CHART_PALETTE[i % CHART_PALETTE.length],
-      stack: 's', borderRadius: 4,
-    };
-  });
-  chartUpdate('chart-fail-count', 'failCount', {
-    type: 'bar',
-    data: { labels, datasets },
-    options: chartOpts({ y: { beginAtZero: true, ticks: { stepSize: 1, precision: 0 } } })
-  });
-}
-
-function drawFailCountTrend(items, bucketMin) {
   const byTs = new Map();
   items.forEach(it => {
     const key = bucketKey(it.ts, bucketMin);
     if (it.kind === 'probe' || !byTs.has(key)) byTs.set(key, it);
   });
   const series = [...byTs.values()].sort((a, b) => a.ts - b.ts);
-  const hint = document.querySelector('[data-hint="fail-count"]');
-  // 每个时间点按 region 拆分:按 regionStats.total 比例估算
-  // (精确的 subRegionFailStats 是 per-snapshot 数据,这里 trend 不复用以保持简单稳定)
   // 失败数用 subLineStats 各 sub 的 (total-ok) 求和(比 lineOkCount/lineTotalCount 更细粒度)
   const regionSet = new Set();
   series.forEach(it => Object.keys(it.summary?.regionStats || {}).forEach(r => regionSet.add(r)));
   const regions = [...regionSet].sort();
-  if (hint) hint.textContent = '时间趋势 · 各地区失败节点数(估算)';
   const labels = series.map(it => formatTime(it.ts, currentHours));
   const datasets = regions.map((region, i) => {
     const data = series.map(it => {
@@ -1285,43 +1118,6 @@ function buildSubRegionFailures(summary, subList) {
     const remainder = failed - rounded.reduce((a, n) => a + n, 0);
     if (remainder > 0 && rounded.length > 0) {
       // 把余数加到比例最大的那个,保证整数求和 = failed
-      const topIdx = allocations.reduce((best, a, i) => a.exact - allocations[best].exact > 0 ? i : best, 0);
-      rounded[topIdx] += remainder;
-    }
-    allocations.forEach((a, i) => {
-      if (rounded[i] > 0) out.get(url)[a.r] = rounded[i];
-    });
-  });
-  return out;
-}
-
-// 给定 summary + subList,产出 Map<url, Map<region, okCount>>
-// 没有 subRegionOkStats 精确字段,按 subLineStats[url].ok + regionStats.total 比例分摊
-// 跟 buildSubRegionFailures 对称 — 一张图看 OK 分布,一张看失败分布
-function buildSubRegionOks(summary, subList) {
-  const out = new Map();
-  if (!summary) return out;
-  subList.forEach(([url]) => out.set(url, {}));
-
-  const regionStats = summary.regionStats || {};
-  const regions = Object.keys(regionStats);
-  const sumRegionTotal = regions.reduce((a, r) => a + (regionStats[r]?.total || 0), 0);
-  subList.forEach(([url]) => {
-    const st = summary.subLineStats?.[url];
-    if (!st) return;
-    const ok = st.ok ?? 0;
-    if (ok === 0) return;
-    if (sumRegionTotal <= 0 || regions.length === 0) {
-      out.get(url)['未知'] = (out.get(url)['未知'] || 0) + ok;
-      return;
-    }
-    const allocations = regions.map(r => ({
-      r,
-      exact: ok * (regionStats[r]?.total || 0) / sumRegionTotal,
-    }));
-    const rounded = allocations.map(a => Math.floor(a.exact));
-    const remainder = ok - rounded.reduce((a, n) => a + n, 0);
-    if (remainder > 0 && rounded.length > 0) {
       const topIdx = allocations.reduce((best, a, i) => a.exact - allocations[best].exact > 0 ? i : best, 0);
       rounded[topIdx] += remainder;
     }
@@ -1874,6 +1670,11 @@ function chartUpdate(canvasId, key, config) {
     charts[key].update();
   } else {
     charts[key] = new Chart(ctx, config);
+  }
+  // 图表已渲染(无论新建还是更新)→ 隐藏 chart-wrap 里的 skeleton 占位
+  // 早 return(failed / 304 / 无数据)不会调到 chartUpdate,skeleton 保持显示 — 正是想要的效果
+  if (ctx && ctx.parentElement) {
+    ctx.parentElement.classList.add('is-loaded');
   }
 }
 
