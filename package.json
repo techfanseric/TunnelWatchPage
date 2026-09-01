@@ -1,5 +1,6 @@
 {
   "name": "tunnelwatch-page",
+  "type": "module",
   "version": "0.1.0",
   "private": true,
   "description": "TunnelWatch telemetry viewer — Cloudflare Pages + D1",
@@ -10,6 +11,7 @@
     "db:migrate:filter-share": "wrangler d1 execute tunnelwatch --local --file=migrations/0003_bill_share_filters.sql",
     "db:seed": "node scripts/seed.mjs",
     "db:pull": "node scripts/pull-remote.mjs",
+    "verify:regions": "node scripts/verify-regions.mjs",
     "db:query": "wrangler d1 execute tunnelwatch --local --command",
     "db:reset": "rm -rf .wrangler/state && npm run db:init && npm run db:migrate:billing && npm run db:migrate:filter-share && npm run db:pull"
   },

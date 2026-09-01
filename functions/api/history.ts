@@ -28,6 +28,7 @@
 //   FROM bucketed WHERE rn = 1
 //   ORDER BY bucket_ts ASC
 import type { PagesFunction } from '@cloudflare/workers-types';
+import { normalizeSnapshotSummary } from './_regions.js';
 
 interface Env {
   DB: D1Database;
@@ -38,6 +39,7 @@ interface SummaryRow {
   ts: number;
   kind: string;
   summary_json: string;
+  payload_json: string;
 }
 
 const BUCKET_BY_HOURS: Record<number, { minutes: number; label: string }> = {
@@ -85,6 +87,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       SELECT
         (ts / ?) * ? AS bucket_ts,
         summary_json,
+        payload_json,
         kind,
         ROW_NUMBER() OVER (
           PARTITION BY (ts / ?)
@@ -95,7 +98,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         AND kind IN (${placeholders})
         AND ts >= ?
     )
-    SELECT bucket_ts AS ts, kind, summary_json
+    SELECT bucket_ts AS ts, kind, summary_json, payload_json
     FROM bucketed
     WHERE rn = 1
     ORDER BY ts ASC
@@ -113,12 +116,12 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
   const items = (result.results || []).map((r) => ({
     ts: r.ts,
     kind: r.kind,
-    summary: safeParse(r.summary_json),
+    summary: normalizeSnapshotSummary(safeParse(r.summary_json), safeParse(r.payload_json)),
   }));
 
   // ETag 用 device + hours + maxTs — 新快照来时 maxTs 必变,客户端命中 304 直接复用旧 items
   const maxTs = items.length > 0 ? items[items.length - 1].ts : 0;
-  const etag = `W/"${device}-${hours}-${maxTs}-${items.length}"`;
+  const etag = `W/"regions-v2-${device}-${hours}-${maxTs}-${items.length}"`;
   if (context.request.headers.get('If-None-Match') === etag) {
     return new Response(null, { status: 304, headers: { etag } });
   }

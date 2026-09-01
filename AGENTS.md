@@ -37,6 +37,19 @@ TunnelWatch 的可视化端,Cloudflare Pages + D1 部署。Agent 端(Android,不
 
 原"堆叠柱状图布局对称"约定随 snapshot 删除而废止,不再适用。
 
+### 🚨 4. 每次部署到线上前必须更新 APP_VERSION
+
+`public/app.js:13` 的 `APP_VERSION` 是发版时间戳,同时被页面右上角 `brand-version` 元素显示(见 `public/app.js:171-172`、`public/index.html:233`)。这是用户判断"deploy 到底生效没"的最直接信号 — 刷新页面看版本号有没有变,没变就是没发上去。
+
+**硬性步骤:每次 `wrangler pages deploy` 之前,先改 `APP_VERSION`**:
+
+- 格式:`YYYY.MM.DD-HHmm`(例:`2026.09.01-2250`),沿用现有风格
+- 取本地发版时刻(不是 commit 时间,不是 UTC),理由:跟用户看到的发版体验对齐
+- 同一分钟内连续发版,也要 bump(用 HHmm 区分,允许同一天多条)
+- 这是发版清单的第一项,不是事后补
+
+deploy 完成后,人工/截图自检:打开线上页面,确认 brand-version 文本 = 你刚写入的值;如果还是旧值,说明 deploy 没生效,先排查再合 PR。
+
 ## 命令速查
 
 ```bash

@@ -2,6 +2,7 @@
 // 拿指定设备指定 kind 的最新一条快照;不传 device 拿所有设备的最新
 // 响应: {device, kind, ts, summary, payload} 或 404
 import type { PagesFunction } from '@cloudflare/workers-types';
+import { normalizeSnapshotSummary } from './_regions.js';
 
 interface Env {
   DB: D1Database;
@@ -49,19 +50,21 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 
   // ETag 用 row.id(自增,新行必然 id 不同)— 命中 304 直接省去 JSON parse + 渲染
   // 强 ETag 即可:id 变了 = 新行,内容必然变;客户端无需验证载荷
-  const etag = `W/"${row.id}"`;
+  const etag = `W/"regions-v2-${row.id}"`;
   if (context.request.headers.get('If-None-Match') === etag) {
     return new Response(null, { status: 304, headers: { etag } });
   }
 
+  const payload = safeParse(row.payload_json);
+  const summary = normalizeSnapshotSummary(safeParse(row.summary_json), payload);
   return jsonWithEtag({
     id: row.id,
     device: row.device_uuid,
     deviceName: row.device_name,
     kind: row.kind,
     ts: row.ts,
-    summary: safeParse(row.summary_json),
-    payload: safeParse(row.payload_json),
+    summary,
+    payload,
   }, etag);
 };
 

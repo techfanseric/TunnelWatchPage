@@ -3,6 +3,7 @@
 // 15min dedup:同 device+kind 在 15min 窗口内的旧记录先删,再插入新记录
 // 失败:4xx 返回 JSON {error} 方便 App 端 log
 import type { PagesFunction } from '@cloudflare/workers-types';
+import { normalizeSnapshotSummary } from './_regions.js';
 
 interface Env {
   DB: D1Database;
@@ -63,7 +64,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
   const dedupDeleted = delResult.meta?.changes ?? 0;
 
   // 4. INSERT 新记录
-  const summaryJson = JSON.stringify(body.summary ?? {});
+  // Agent 的地区解析规则可能滞后；展示端在唯一入口统一按原始 lines 重算，
+  // 确保地区卡片、地图和历史趋势都读取同一份规范化 summary。
+  const normalizedSummary = normalizeSnapshotSummary(body.summary, body.payload);
+  const summaryJson = JSON.stringify(normalizedSummary);
   const payloadJson = JSON.stringify(body.payload ?? {});
   const deviceName = (body.deviceName?.trim() || device.name).slice(0, 64);
   const insResult = await env.DB

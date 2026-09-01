@@ -10,7 +10,7 @@ import { geoNaturalEarth1, geoPath } from 'd3-geo';
 const REFRESH_MS = 60_000;
 // 发版标签 — 每次 `wrangler pages deploy` 前手动 bump 一下,刷新页面看 header 是否更新 → 确认 deploy 生效
 // 格式:YYYY.MM.DD-HHMM(本地时间),不需要严格 semver,关键是要"每次发版都换字符串"
-const APP_VERSION = '2026.09.01-2250';
+const APP_VERSION = '2026.09.01-2337';
 // 世界地图 TopoJSON 来源(importmap 把 d3-geo/topojson-client 解析到 jsdelivr ESM,JSON 走 fetch 避免 MIME 限制)
 const WORLD_TOPO_URL = '/vendor/world-50m.json';
 // Chart.js 不解析 CSS var(),要写 hex
@@ -54,7 +54,8 @@ const HOURS_LABEL = { 24: '24h', 168: '7d', 720: '30d' };
 const REGION_TO_ISO = {
   HK: '344', JP: '392', TW: '158', SG: '702', KR: '410',
   UK: '826', US: '840', IN: '356', AU: '036', DE: '276',
-  MY: '458', TH: '764', VN: '704', TR: '792',
+  MY: '458', TH: '764', VN: '704', TR: '792', CA: '124',
+  FR: '250', ID: '360',
   CN: '156',
 };
 // 缓存最近一次 history fetch(7d/30d 地图复用)
@@ -1318,17 +1319,14 @@ async function renderWorldMapCard() {
 
   // 4. 把 regionStats key("🇭🇰 HK" 等)归一化成 {ISO → 第一个匹配 region(其余合并)}
   //   - 一个 ISO 可能被多个 region 匹配(理论上不该出现,先收集所有)
-  //   - "🌐 其他" 单独走中国色块(ISO 156)
+  //   - 未知 region 不伪装成中国，地图上不着色
   const isoToRegionInfo = new Map();
   Object.entries(rs).forEach(([region, v]) => {
     if (v.total == null || v.total === 0) return;
     // 剥掉 emoji(用 code-point-aware 的方式,flag 是两个 regional indicator)
     const code = region.replace(/[\u{1F1E6}-\u{1F1FF}]/gu, '').trim().toUpperCase();
     let iso = REGION_TO_ISO[code];
-    if (!iso) {
-      // 未知 region(比如 "🌐 其他")→ 落到中国(ISO 156)
-      iso = REGION_TO_ISO.CN;
-    }
+    if (!iso) return;
     const okRate = v.total > 0 ? v.ok / v.total : 0;
     const info = { region, v, p50: v.p50, okRate, color: null, title: null };
     const c = colorByP50(v);
