@@ -438,6 +438,11 @@ body.is-share-mode .brand h1 { font-size: 16px; }
   .dashboard-layout { grid-template-columns: 1fr; }
   .receipt-rail { position: static; max-height: none; }
   .receipt-paper { max-height: 520px; }
+
+  /* 窄屏:tab 切换器(view-switcher / seg-toggle)旁的描述文字占位,挤掉标题或 tab 文字
+     宽度,统一隐藏;tab 自己有 aria-label / 文案,信息不丢 */
+  .head-right .chart-hint,
+  .chart-head-right .chart-hint { display: none; }
 }
 
 /* ---------- Masonry (真瀑布流 CSS columns) ----------
