@@ -130,10 +130,20 @@ Response: `{ id, device, deviceName, kind, ts, summary, payload }`
 
 Response: `{ device, hours, kind, items: [{ id, ts, kind, summary }, ...] }`
 
-### 账单 API
+### 账单功能
+
+Web 端的票据栏提供：
+
+- **录入** — 关联到具体订阅源（从最新快照的订阅列表拉），选了真实订阅源后类型自动切到"续费"（用户可改回"新增"）
+- **支付人自动补全** — 从历史账单里聚合去重，做成 `<datalist>` 输入候选；新增 / 删除票据后自动刷新
+- **筛选面板** — 支付时间 from/to + 支付人多选下拉；切换筛选时顶部金额只统计筛后合计
+- **筛选分享** — 设置筛选后点"创建分享链接"生成只读 shareUrl，纯 URL 复制（无附加文字）；打开链接只展示筛选后的票据（隐藏主面板 / 设备选择 / view-switcher / 页脚）
+- **单条票据** — 再续一节 / 分享 / 删除三个操作按钮
+
+## 账单 API
 
 - `GET /api/bills`：列出个人云端账本，需要 `X-Device-Uuid`；响应同时返回去重 `payers` 列表，供前端下拉候选。
-- `POST /api/bills`：新增一张“新增 / 续费”票据；金额使用人民币分，`unlimited=true` 时不传到期日。
+- `POST /api/bills`：新增一张"新增 / 续费"票据；金额使用人民币分，`unlimited=true` 时不传到期日。
 - `PUT /api/bills/:id` / `DELETE /api/bills/:id`：修改或删除票据，需要已登记设备 UUID。
 - `GET /api/bills/share/:token`：只返回可分享字段，不泄露设备 UUID、订阅 URL 或分享令牌。
 - `POST /api/bills/share-filter`：根据筛选条件（`paidFrom` / `paidTo` / `payers[]`）创建一条只读分享链接，返回 `{ token, filters, shareUrl }`。
