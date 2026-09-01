@@ -19,15 +19,22 @@ App 端:每次 widget 刷新(FULL 拉取 + PROBE 测活)把 `ProxyStatus` 上报
 
 ## 本地开发
 
-### 1. 装依赖 + 初始化 D1
+> **本地预览必须用真实数据** — `npm run db:seed` 生成的假数据（momo-A/B、big-A/B、stl-A/B 这些固定名字）只能验证 happy path，看不到真实 OnePlus 设备的渲染/性能/边界问题。改完 UI 想看真实效果请用 `npm run db:pull` 拉远程 D1 下来。详见 `AGENTS.md`。
+
+### 1. 装依赖 + 拉真实数据
 
 ```bash
 cd ~/TunnelWatchPage
-npm install                # 装 wrangler + types(本地 dev,不需要 Cloudflare 账号)
-npm run db:init            # 在本地 D1 创建表(devices + snapshots)
-npm run db:migrate:billing # 创建云端账单表(bills)
-npm run db:seed            # 插入 24h 假数据 + 1 个授权设备(0x...0001 DevTestPhone)
+npm install                # 装 wrangler + types
+npm run db:init            # 首次:在本地 D1 创建表(devices + snapshots)
+npm run db:migrate:billing # 首次:创建云端账单表(bills)
+npm run db:migrate:filter-share # 首次:创建账单分享筛选表
+npm run db:pull            # 每次开发前:从远程 D1 拉真数据到本地(覆盖)
 ```
+
+`db:pull` 前提:已 `wrangler login`(或设置 `CLOUDFLARE_API_TOKEN`)。脚本导出文件落在 `scripts/.cache/`(已在 `.gitignore`)。
+
+**离线 / 不想用真数据?** 退路:`npm run db:seed` 生成假数据(只够截图、不够真测试)。
 
 ### 2. 启动 dev server
 
