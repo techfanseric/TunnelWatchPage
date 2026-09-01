@@ -6,9 +6,10 @@
   "scripts": {
     "dev": "wrangler pages dev public --port 8788 --ip 127.0.0.1",
     "db:init": "wrangler d1 execute tunnelwatch --local --file=migrations/0001_init.sql",
+    "db:migrate:billing": "wrangler d1 execute tunnelwatch --local --file=migrations/0002_billing.sql",
     "db:seed": "node scripts/seed.mjs",
     "db:query": "wrangler d1 execute tunnelwatch --local --command",
-    "db:reset": "rm -rf .wrangler/state && npm run db:init && npm run db:seed"
+    "db:reset": "rm -rf .wrangler/state && npm run db:init && npm run db:migrate:billing && npm run db:seed"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240919.0",

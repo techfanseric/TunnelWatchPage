@@ -240,7 +240,63 @@
       </div>
     </header>
 
-    <div class="masonry">
+    <div class="dashboard-layout">
+      <aside class="receipt-rail" aria-label="账单">
+        <div class="receipt-toolbar">
+          <div>
+            <span class="receipt-kicker">BILLING LEDGER</span>
+            <h2>账单</h2>
+          </div>
+          <button class="receipt-add" id="bill-add" type="button">记一笔</button>
+        </div>
+
+        <form class="bill-form" id="bill-form" hidden>
+          <div class="bill-form-title">
+            <strong id="bill-form-heading">新增票据</strong>
+            <button type="button" id="bill-cancel" aria-label="关闭">×</button>
+          </div>
+          <label>订阅源
+            <select id="bill-source"><option value="">手动填写</option></select>
+          </label>
+          <label>名称<input id="bill-name" maxlength="120" required placeholder="例如：Liangxin HK"></label>
+          <div class="bill-form-grid">
+            <label>类型
+              <select id="bill-type"><option value="renewal">续费</option><option value="purchase">新增</option></select>
+            </label>
+            <label>金额（元）<input id="bill-amount" type="number" min="0" max="1000000" step="0.01" required inputmode="decimal" placeholder="0.00"></label>
+          </div>
+          <div class="bill-form-grid">
+            <label>支付人<input id="bill-payer" maxlength="80" required autocomplete="name"></label>
+            <label>支付日期<input id="bill-paid-on" type="date" required></label>
+          </div>
+          <div class="bill-form-grid">
+            <label>生效日期<input id="bill-starts-on" type="date" required></label>
+            <label id="bill-expires-wrap">到期日期<input id="bill-expires-on" type="date"></label>
+          </div>
+          <label class="bill-unlimited"><input id="bill-unlimited" type="checkbox"> 不限时间</label>
+          <label>备注<textarea id="bill-note" maxlength="500" rows="2" placeholder="可选"></textarea></label>
+          <div class="bill-form-actions">
+            <span id="bill-form-status" role="status"></span>
+            <button type="submit">打印票据</button>
+          </div>
+        </form>
+
+        <section class="receipt-paper" id="receipt-paper">
+          <header class="receipt-head">
+            <span>TW / RECEIPT</span><span id="receipt-count">NO. --</span>
+          </header>
+          <div class="receipt-summary">
+            <span>累计支出</span>
+            <strong id="receipt-total">¥ —</strong>
+          </div>
+          <div class="receipt-rule">✣ ✣ ✣ ✣ ✣ ✣ ✣ ✣ ✣ ✣ ✣ ✣</div>
+          <div class="receipt-feed" id="bill-list"><p class="receipt-empty">还没有票据<br>记下第一次新增或续费</p></div>
+          <footer class="receipt-foot">人民币 CNY · 云端账本<br>THANK YOU FOR KEEPING WATCH</footer>
+        </section>
+      </aside>
+
+      <div class="dashboard-main">
+      <div class="masonry">
 
       <!-- 卡片镜像:复刻 Android widget 4×1 的视觉 -->
       <section class="widget-mirror" id="widget-mirror">
@@ -376,11 +432,13 @@
         <div class="chart-wrap"><canvas id="chart-traffic-rate"></canvas></div>
       </section>
 
-    </div>
+      </div>
 
-    <footer class="page-footer">
-      <span id="footer-status">加载中…</span>
-    </footer>
+      <footer class="page-footer">
+        <span id="footer-status">加载中…</span>
+      </footer>
+      </div>
+    </div>
   </main>
 
   <script src="/app.js" type="module"></script>

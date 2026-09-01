@@ -25,6 +25,7 @@ App 端:每次 widget 刷新(FULL 拉取 + PROBE 测活)把 `ProxyStatus` 上报
 cd ~/TunnelWatchPage
 npm install                # 装 wrangler + types(本地 dev,不需要 Cloudflare 账号)
 npm run db:init            # 在本地 D1 创建表(devices + snapshots)
+npm run db:migrate:billing # 创建云端账单表(bills)
 npm run db:seed            # 插入 24h 假数据 + 1 个授权设备(0x...0001 DevTestPhone)
 ```
 
@@ -129,6 +130,15 @@ Response: `{ id, device, deviceName, kind, ts, summary, payload }`
 
 Response: `{ device, hours, kind, items: [{ id, ts, kind, summary }, ...] }`
 
+### 账单 API
+
+- `GET /api/bills`：列出个人云端账本，需要 `X-Device-Uuid`。
+- `POST /api/bills`：新增一张“新增 / 续费”票据；金额使用人民币分，`unlimited=true` 时不传到期日。
+- `PUT /api/bills/:id` / `DELETE /api/bills/:id`：修改或删除票据，需要已登记设备 UUID。
+- `GET /api/bills/share/:token`：只返回可分享字段，不泄露设备 UUID、订阅 URL 或分享令牌。
+
+账单首版使用显式 `owner_id=personal`，为后续多用户迁移保留所有权边界；当前写权限仍沿用设备白名单。
+
 ## 部署到 pages.dev
 
 把 `functions/api/ingest` 暴露到公网,让 App 不再依赖 `adb reverse`,实现"不碰手机"也能静默上传。
@@ -180,6 +190,12 @@ npx wrangler pages deploy public --project-name=tunnelwatch
 
 > 第一次部署前 `wrangler` 可能要求在 Cloudflare Dashboard 创建 Pages project,
 > 或者直接用 `wrangler pages project create tunnelwatch` 提前建。
+
+新增账单功能的现有环境还需要执行一次：
+
+```bash
+npx wrangler d1 execute tunnelwatch --remote --file=migrations/0002_billing.sql
+```
 
 ### 3. 注册设备 UUID 到远程 D1
 

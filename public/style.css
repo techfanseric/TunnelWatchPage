@@ -14,6 +14,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 
 html, body {
   margin: 0;
@@ -33,6 +34,214 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+.dashboard-layout {
+  display: grid;
+  grid-template-columns: 344px minmax(0, 1fr);
+  align-items: start;
+  gap: 14px;
+}
+.dashboard-main { min-width: 0; }
+
+/* ---------- Billing receipt rail ---------- */
+.receipt-rail {
+  position: sticky;
+  top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  max-height: calc(100vh - 28px);
+}
+.receipt-toolbar {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 4px;
+}
+.receipt-toolbar h2 {
+  margin: 1px 0 0;
+  font-size: 18px;
+  line-height: 1.1;
+}
+.receipt-kicker {
+  color: var(--secondary);
+  font: 700 9px/1.2 "SFMono-Regular", Consolas, monospace;
+  letter-spacing: .16em;
+}
+.receipt-add,
+.bill-form-actions button {
+  appearance: none;
+  border: 1px solid var(--text);
+  background: var(--text);
+  color: var(--surface);
+  border-radius: 4px;
+  padding: 7px 11px;
+  font: 700 11px/1.2 inherit;
+  cursor: pointer;
+}
+.receipt-add:hover,
+.bill-form-actions button:hover { background: var(--primary); border-color: var(--primary); }
+.receipt-add:focus-visible,
+.bill-form button:focus-visible,
+.bill-form input:focus-visible,
+.bill-form select:focus-visible,
+.bill-form textarea:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.bill-form {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+  animation: bill-form-in .22s cubic-bezier(.22, 1, .36, 1) both;
+}
+.bill-form[hidden] { display: none; }
+@keyframes bill-form-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.bill-form-title,
+.bill-form-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.bill-form-title strong { font-size: 13px; }
+.bill-form-title button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--secondary);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+.bill-form label {
+  display: grid;
+  gap: 4px;
+  color: var(--meta);
+  font-size: 10px;
+  letter-spacing: .04em;
+}
+.bill-form input,
+.bill-form select,
+.bill-form textarea {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  padding: 5px 1px;
+  font: 500 12px/1.35 inherit;
+}
+.bill-form textarea { resize: vertical; }
+.bill-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.bill-unlimited { display: flex !important; align-items: center; grid-auto-flow: column; justify-content: start; }
+.bill-unlimited input { width: 14px; accent-color: var(--primary); }
+.bill-form-actions span { color: var(--err); font-size: 10px; }
+
+.receipt-paper {
+  position: relative;
+  overflow: auto;
+  scrollbar-width: thin;
+  background: var(--surface);
+  border: 1px solid oklch(0.9 0.008 255);
+  box-shadow: 0 10px 28px oklch(0.32 0.025 255 / .08);
+  padding: 18px 18px 24px;
+  color: oklch(0.28 0.018 255);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+.receipt-paper::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 7px;
+  background: radial-gradient(circle at 4px 8px, transparent 4px, var(--surface) 4.5px) 0 0 / 8px 8px repeat-x;
+}
+.receipt-head,
+.receipt-entry-head,
+.receipt-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.receipt-head {
+  font-size: 9px;
+  letter-spacing: .1em;
+}
+.receipt-summary {
+  display: grid;
+  gap: 2px;
+  padding: 20px 0 14px;
+}
+.receipt-summary span { color: var(--meta); font-size: 10px; }
+.receipt-summary strong { font-size: 30px; line-height: 1; letter-spacing: -.05em; font-variant-numeric: tabular-nums; }
+.receipt-rule {
+  overflow: hidden;
+  height: 12px;
+  color: oklch(0.72 0.01 255);
+  font-size: 9px;
+  white-space: nowrap;
+  letter-spacing: .2em;
+}
+.receipt-feed { display: grid; }
+.receipt-entry {
+  padding: 15px 0 14px;
+  border-bottom: 1px dashed oklch(0.82 0.008 255);
+  transform-origin: top center;
+  animation: receipt-print .42s cubic-bezier(.22, 1, .36, 1) both;
+}
+@keyframes receipt-print {
+  from { opacity: 0; transform: translateY(-14px) scaleY(.96); }
+  to { opacity: 1; transform: translateY(0) scaleY(1); }
+}
+.receipt-entry-head strong { font: 700 12px/1.3 inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.receipt-entry-head span { flex: none; font-size: 9px; color: var(--meta); }
+.receipt-kind {
+  margin: 4px 0 9px;
+  color: var(--primary);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .12em;
+}
+.receipt-line { padding: 2px 0; color: var(--meta); font-size: 10px; }
+.receipt-line b { color: var(--text); font-weight: 600; text-align: right; }
+.receipt-amount { margin-top: 7px; color: var(--text); font-size: 16px !important; }
+.receipt-actions { display: flex; gap: 12px; padding-top: 10px; }
+.receipt-actions button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--meta);
+  padding: 0;
+  font: 700 9px/1 inherit;
+  cursor: pointer;
+  letter-spacing: .06em;
+}
+.receipt-actions button:hover { color: var(--primary); }
+.receipt-empty { padding: 36px 0; color: var(--secondary); text-align: center; font-size: 10px; line-height: 1.8; }
+.receipt-foot { padding-top: 18px; color: var(--secondary); text-align: center; font-size: 8px; line-height: 1.8; letter-spacing: .08em; }
+
+@media (max-width: 980px) {
+  .dashboard-layout { grid-template-columns: 1fr; }
+  .receipt-rail { position: static; max-height: none; }
+  .receipt-paper { max-height: 520px; }
 }
 
 /* ---------- Masonry (真瀑布流 CSS columns) ----------

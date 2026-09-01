@@ -54,6 +54,9 @@ let lastHistoryItems = null;
 let lastHistoryHours = null;
 // 缓存 world-atlas GeoJSON(50m,模块加载完就解析一次)
 let worldGeoFeatures = null;
+let bills = [];
+let billSources = [];
+const sharedBillToken = new URLSearchParams(location.search).get('bill');
 
 // URL 参数: ?hours=24|168|720 — 让链接可携带视角(分享/截屏固定)
 // ?device=<uuid> — 跳过 loadDevices 默认选择
@@ -68,6 +71,7 @@ let worldGeoFeatures = null;
 init();
 
 async function init() {
+  wireBilling();
   wireViewSwitcher();
   wireRegionSortSwitcher();
   wireRenewalSortSwitcher();
@@ -174,13 +178,19 @@ async function loadDevices() {
       currentDevice = sel.value;
       localStorage.setItem('tw_device', currentDevice);
       refreshAll();
+      if (!sharedBillToken) loadBills();
+      loadBillSources();
     });
     // 默认选上次记忆的,否则第一个
     const remembered = localStorage.getItem('tw_device');
     const target = devices.find(d => d.uuid === remembered) || devices[0];
     sel.value = target.uuid;
     currentDevice = target.uuid;
-    await refreshAll();
+    await Promise.all([
+      refreshAll(),
+      sharedBillToken ? loadSharedBill(sharedBillToken) : loadBills(),
+      loadBillSources(),
+    ]);
   } catch (e) {
     setFooter('加载设备列表失败: ' + e.message, false);
   }
@@ -984,6 +994,211 @@ async function renderWorldMapCard() {
       tip.classList.remove('visible');
     });
   }
+}
+
+// ---------- Billing receipt ----------
+function wireBilling() {
+  const form = document.getElementById('bill-form');
+  const unlimited = document.getElementById('bill-unlimited');
+  document.getElementById('bill-add').addEventListener('click', () => openBillForm());
+  document.getElementById('bill-cancel').addEventListener('click', closeBillForm);
+  document.getElementById('bill-source').addEventListener('change', (e) => {
+    const source = billSources.find((s) => s.key === e.target.value);
+    if (source) document.getElementById('bill-name').value = source.name;
+  });
+  unlimited.addEventListener('change', syncUnlimitedField);
+  form.addEventListener('submit', submitBill);
+  document.getElementById('bill-list').addEventListener('click', (e) => {
+    const button = e.target.closest('button[data-bill-action]');
+    if (!button) return;
+    const bill = bills.find((item) => item.id === Number(button.dataset.billId));
+    if (!bill) return;
+    if (button.dataset.billAction === 'renew') openBillForm(bill);
+    if (button.dataset.billAction === 'share') shareBill(bill);
+    if (button.dataset.billAction === 'delete') deleteBill(bill);
+  });
+}
+
+function localISODate(date = new Date()) {
+  const offset = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 10);
+}
+
+function openBillForm(previous = null) {
+  const today = localISODate();
+  const nextYear = new Date(`${today}T12:00:00`);
+  nextYear.setFullYear(nextYear.getFullYear() + 1);
+  document.getElementById('bill-form-heading').textContent = previous ? `续费 · ${previous.subscriptionName}` : '新增票据';
+  document.getElementById('bill-source').value = previous?.subscriptionKey || '';
+  document.getElementById('bill-name').value = previous?.subscriptionName || '';
+  document.getElementById('bill-type').value = previous ? 'renewal' : 'purchase';
+  document.getElementById('bill-amount').value = '';
+  document.getElementById('bill-payer').value = previous?.payer || localStorage.getItem('tw_bill_payer') || '';
+  document.getElementById('bill-paid-on').value = today;
+  document.getElementById('bill-starts-on').value = previous?.expiresOn || today;
+  document.getElementById('bill-expires-on').value = localISODate(nextYear);
+  document.getElementById('bill-unlimited').checked = previous?.unlimited || false;
+  document.getElementById('bill-note').value = '';
+  document.getElementById('bill-form-status').textContent = '';
+  document.getElementById('bill-form').hidden = false;
+  syncUnlimitedField();
+  document.getElementById('bill-amount').focus();
+}
+
+function closeBillForm() {
+  document.getElementById('bill-form').hidden = true;
+}
+
+function syncUnlimitedField() {
+  const checked = document.getElementById('bill-unlimited').checked;
+  const expires = document.getElementById('bill-expires-on');
+  document.getElementById('bill-expires-wrap').hidden = checked;
+  expires.required = !checked;
+  expires.disabled = checked;
+}
+
+async function loadBillSources() {
+  if (!currentDevice) return;
+  try {
+    const res = await fetch(`/api/latest?device=${encodeURIComponent(currentDevice)}&kind=full`);
+    if (!res.ok) return;
+    const data = await res.json();
+    billSources = (data.payload?.subscriptions || []).map((s) => ({
+      key: s.url || '',
+      name: s.flag || s.traffic?.sourceLabel || safeHost(s.url) || '订阅源',
+    })).filter((s, i, all) => s.key && all.findIndex((x) => x.key === s.key) === i);
+    const select = document.getElementById('bill-source');
+    const selected = select.value;
+    select.innerHTML = '<option value="">手动填写</option>' + billSources.map((s) =>
+      `<option value="${escapeHtml(s.key)}">${escapeHtml(s.name)} · ${escapeHtml(safeHost(s.key))}</option>`
+    ).join('');
+    select.value = billSources.some((s) => s.key === selected) ? selected : '';
+  } catch (e) {
+    console.warn('load bill sources failed', e);
+  }
+}
+
+async function loadBills() {
+  if (!currentDevice) return;
+  try {
+    const res = await fetch('/api/bills', { headers: { 'X-Device-Uuid': currentDevice } });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    bills = (await res.json()).bills || [];
+    renderBills();
+  } catch (e) {
+    document.getElementById('bill-list').innerHTML = `<p class="receipt-empty">账本读取失败<br>${escapeHtml(e.message)}</p>`;
+  }
+}
+
+async function loadSharedBill(token) {
+  try {
+    const res = await fetch(`/api/bills/share/${encodeURIComponent(token)}`);
+    if (!res.ok) throw new Error('分享票据不存在或已失效');
+    bills = [(await res.json()).bill];
+    renderBills(true);
+    document.getElementById('bill-add').hidden = true;
+    document.querySelector('.receipt-kicker').textContent = 'SHARED RECEIPT';
+  } catch (e) {
+    document.getElementById('bill-list').innerHTML = `<p class="receipt-empty">${escapeHtml(e.message)}</p>`;
+  }
+}
+
+async function submitBill(event) {
+  event.preventDefault();
+  if (!currentDevice) return;
+  const status = document.getElementById('bill-form-status');
+  const submit = event.submitter;
+  submit.disabled = true;
+  status.textContent = '打印中…';
+  const amount = Number(document.getElementById('bill-amount').value);
+  const payload = {
+    subscriptionKey: document.getElementById('bill-source').value,
+    subscriptionName: document.getElementById('bill-name').value,
+    entryType: document.getElementById('bill-type').value,
+    amountFen: Math.round(amount * 100),
+    payer: document.getElementById('bill-payer').value,
+    paidOn: document.getElementById('bill-paid-on').value,
+    startsOn: document.getElementById('bill-starts-on').value,
+    expiresOn: document.getElementById('bill-expires-on').value || null,
+    unlimited: document.getElementById('bill-unlimited').checked,
+    note: document.getElementById('bill-note').value,
+  };
+  try {
+    const res = await fetch('/api/bills', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Device-Uuid': currentDevice },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    localStorage.setItem('tw_bill_payer', payload.payer.trim());
+    bills.unshift(data.bill);
+    closeBillForm();
+    renderBills();
+    document.getElementById('receipt-paper').scrollTo({ top: 0, behavior: 'smooth' });
+  } catch (e) {
+    status.textContent = e.message;
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+function renderBills(shared = false) {
+  const list = document.getElementById('bill-list');
+  const totalFen = bills.reduce((sum, bill) => sum + bill.amountFen, 0);
+  document.getElementById('receipt-count').textContent = `NO. ${String(bills.length).padStart(3, '0')}`;
+  document.getElementById('receipt-total').textContent = formatRmb(totalFen);
+  if (!bills.length) {
+    list.innerHTML = '<p class="receipt-empty">还没有票据<br>记下第一次新增或续费</p>';
+    return;
+  }
+  list.innerHTML = bills.map((bill, index) => `
+    <article class="receipt-entry" style="animation-delay:${Math.min(index * 30, 180)}ms">
+      <div class="receipt-entry-head"><strong>${escapeHtml(bill.subscriptionName)}</strong><span>#${String(bill.id).padStart(5, '0')}</span></div>
+      <div class="receipt-kind">${bill.entryType === 'renewal' ? 'RENEWAL / 续费' : 'NEW / 新增'}</div>
+      <div class="receipt-line"><span>支付</span><b>${escapeHtml(bill.paidOn)}</b></div>
+      <div class="receipt-line"><span>支付人</span><b>${escapeHtml(bill.payer)}</b></div>
+      <div class="receipt-line"><span>周期</span><b>${bill.unlimited ? '不限时间' : `${escapeHtml(bill.startsOn)} → ${escapeHtml(bill.expiresOn)}`}</b></div>
+      ${bill.note ? `<div class="receipt-line"><span>备注</span><b>${escapeHtml(bill.note)}</b></div>` : ''}
+      <div class="receipt-line receipt-amount"><span>合计</span><b>${formatRmb(bill.amountFen)}</b></div>
+      ${shared ? '' : `<div class="receipt-actions">
+        <button data-bill-action="renew" data-bill-id="${bill.id}">再续一节</button>
+        <button data-bill-action="share" data-bill-id="${bill.id}">分享</button>
+        <button data-bill-action="delete" data-bill-id="${bill.id}">删除</button>
+      </div>`}
+    </article>`).join('');
+}
+
+async function shareBill(bill) {
+  const text = `${bill.subscriptionName} · ${bill.entryType === 'renewal' ? '续费' : '新增'} · ${formatRmb(bill.amountFen)} · ${bill.paidOn}`;
+  try {
+    if (navigator.share) await navigator.share({ title: 'TunnelWatch 账单', text, url: bill.shareUrl });
+    else {
+      await navigator.clipboard.writeText(`${text}\n${bill.shareUrl}`);
+      setFooter('分享链接已复制', true);
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError') setFooter('分享失败: ' + e.message, false);
+  }
+}
+
+async function deleteBill(bill) {
+  if (!confirm(`删除 ${bill.subscriptionName} 的这张票据？`)) return;
+  const res = await fetch(`/api/bills/${bill.id}`, { method: 'DELETE', headers: { 'X-Device-Uuid': currentDevice } });
+  if (!res.ok) {
+    setFooter('删除失败', false);
+    return;
+  }
+  bills = bills.filter((item) => item.id !== bill.id);
+  renderBills();
+}
+
+function formatRmb(fen) {
+  return new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'CNY' }).format((fen || 0) / 100);
+}
+
+function safeHost(url) {
+  try { return new URL(url).hostname; } catch { return ''; }
 }
 
 // ---------- Chart helpers ----------
