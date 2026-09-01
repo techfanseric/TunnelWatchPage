@@ -238,6 +238,202 @@ html, body {
 .receipt-empty { padding: 36px 0; color: var(--secondary); text-align: center; font-size: 10px; line-height: 1.8; }
 .receipt-foot { padding-top: 18px; color: var(--secondary); text-align: center; font-size: 8px; line-height: 1.8; letter-spacing: .08em; }
 
+/* ---------- 筛选面板 / 共享 banner ---------- */
+.bill-filter {
+  display: grid;
+  gap: 8px;
+  padding: 10px 0 12px;
+  border-bottom: 1px dashed oklch(0.82 0.008 255);
+  margin-bottom: 4px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Roboto, sans-serif;
+}
+.bill-filter[hidden] { display: none; }
+.bill-filter-row { display: grid; gap: 4px; }
+.bill-filter-row > label,
+.bill-filter-payers {
+  display: grid;
+  gap: 4px;
+}
+.bill-filter-label,
+.bill-filter-row label {
+  color: var(--secondary);
+  font: 700 9px/1.2 "SFMono-Regular", Consolas, monospace;
+  letter-spacing: .14em;
+}
+.bill-filter-dates {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-size: 12px;
+}
+.bill-filter-dates input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font: 500 12px/1.2 inherit;
+  color: var(--text);
+  background: var(--surface);
+}
+.bill-filter-dash { color: var(--secondary); }
+.bill-filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-height: 22px;
+}
+.bill-filter-chips .chip {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--meta);
+  border-radius: 999px;
+  padding: 3px 9px;
+  font: 600 10px/1.2 inherit;
+  cursor: pointer;
+  letter-spacing: .02em;
+  transition: background .12s, color .12s, border-color .12s;
+}
+.bill-filter-chips .chip:hover { color: var(--text); }
+.bill-filter-chips .chip.active {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
+}
+.bill-filter-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.bill-filter-actions > * { flex: 0 0 auto; }
+
+/* 支付人多选下拉 */
+.payer-dropdown {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.payer-dropdown > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  font: 600 10px/1.2 inherit;
+  letter-spacing: .04em;
+  user-select: none;
+  min-width: 0;
+}
+.payer-dropdown > summary::-webkit-details-marker { display: none; }
+.payer-dropdown[open] > summary {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.payer-dropdown-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+.payer-dropdown-caret {
+  font-size: 9px;
+  color: var(--secondary);
+  transition: transform .15s;
+}
+.payer-dropdown[open] .payer-dropdown-caret { transform: rotate(180deg); }
+.payer-dropdown-menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 200px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px oklch(0.32 0.025 255 / .12);
+  padding: 4px;
+  display: grid;
+  gap: 1px;
+  min-width: 140px;
+}
+.payer-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--text);
+  cursor: pointer;
+  letter-spacing: 0;
+}
+.payer-option:hover { background: var(--primary-soft); }
+.payer-option input { width: 12px; height: 12px; accent-color: var(--primary); }
+.payer-empty {
+  padding: 8px 10px;
+  color: var(--secondary);
+  font-size: 10px;
+  text-align: center;
+}
+.bill-filter-reset,
+.bill-filter-share {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 5px 10px;
+  font: 700 10px/1.2 inherit;
+  letter-spacing: .04em;
+  cursor: pointer;
+}
+.bill-filter-share {
+  background: var(--text);
+  color: var(--surface);
+  border-color: var(--text);
+}
+.bill-filter-share:hover { background: var(--primary); border-color: var(--primary); }
+.bill-filter-reset:hover { color: var(--primary); border-color: var(--primary); }
+
+.shared-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  margin: 6px 0 10px;
+  background: var(--primary-soft);
+  border: 1px solid var(--primary);
+  border-radius: 6px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Roboto, sans-serif;
+  font-size: 11px;
+  color: var(--primary);
+}
+.shared-banner strong { display: block; font-size: 12px; }
+.shared-banner span { display: block; color: var(--meta); font-size: 10px; margin-top: 1px; }
+
+/* 共享筛选视图:只显示账本,把图表区、device picker、view switcher、footer 全部隐藏 */
+body.is-share-mode .dashboard-main,
+body.is-share-mode #view-switcher,
+body.is-share-mode .device-picker,
+body.is-share-mode .page-footer,
+body.is-share-mode .brand h1::after { display: none !important; }
+body.is-share-mode .topbar { gap: 8px; }
+body.is-share-mode .dashboard-layout { grid-template-columns: 1fr; }
+body.is-share-mode .receipt-rail { position: static; max-width: 520px; margin: 0 auto; }
+body.is-share-mode .receipt-paper { max-height: calc(100vh - 220px); }
+body.is-share-mode .brand h1 { font-size: 16px; }
+
 @media (max-width: 980px) {
   .dashboard-layout { grid-template-columns: 1fr; }
   .receipt-rail { position: static; max-height: none; }

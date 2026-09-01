@@ -7,7 +7,13 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
   const result = await context.env.DB.prepare(
     `SELECT * FROM bills WHERE owner_id = ? ORDER BY paid_on DESC, id DESC LIMIT 300`
   ).bind(PERSONAL_OWNER).all<BillRow>();
-  return json({ bills: (result.results || []).map((row) => toBill(row, context.request.url)) });
+  const payerRows = await context.env.DB.prepare(
+    `SELECT DISTINCT payer FROM bills WHERE owner_id = ? AND payer <> '' ORDER BY payer COLLATE NOCASE ASC LIMIT 200`
+  ).bind(PERSONAL_OWNER).all<{ payer: string }>();
+  return json({
+    bills: (result.results || []).map((row) => toBill(row, context.request.url)),
+    payers: (payerRows.results || []).map((r) => r.payer),
+  });
 };
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {

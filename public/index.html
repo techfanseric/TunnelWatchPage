@@ -266,7 +266,8 @@
             <label>金额（元）<input id="bill-amount" type="number" min="0" max="1000000" step="0.01" required inputmode="decimal" placeholder="0.00"></label>
           </div>
           <div class="bill-form-grid">
-            <label>支付人<input id="bill-payer" maxlength="80" required autocomplete="name"></label>
+            <label>支付人<input id="bill-payer" maxlength="80" required autocomplete="name" list="bill-payer-options"></label>
+            <datalist id="bill-payer-options"></datalist>
             <label>支付日期<input id="bill-paid-on" type="date" required></label>
           </div>
           <div class="bill-form-grid">
@@ -286,10 +287,43 @@
             <span>TW / RECEIPT</span><span id="receipt-count">NO. --</span>
           </header>
           <div class="receipt-summary">
-            <span>累计支出</span>
+            <span id="receipt-summary-label">累计支出</span>
             <strong id="receipt-total">¥ —</strong>
           </div>
           <div class="receipt-rule">✣ ✣ ✣ ✣ ✣ ✣ ✣ ✣ ✣ ✣ ✣ ✣</div>
+
+          <!-- 筛选面板(共享模式下隐藏) -->
+          <div class="bill-filter" id="bill-filter">
+            <div class="bill-filter-row">
+              <label>支付时间
+                <div class="bill-filter-dates">
+                  <input type="date" id="bill-filter-from" aria-label="起始日期">
+                  <span class="bill-filter-dash">—</span>
+                  <input type="date" id="bill-filter-to" aria-label="结束日期">
+                </div>
+              </label>
+            </div>
+            <div class="bill-filter-row bill-filter-actions">
+              <details class="payer-dropdown" id="payer-dropdown">
+                <summary>
+                  <span class="payer-dropdown-label" id="payer-dropdown-label">支付人 · 全部</span>
+                  <span class="payer-dropdown-caret" aria-hidden="true">▾</span>
+                </summary>
+                <div class="payer-dropdown-menu" id="bill-filter-payers" role="group" aria-label="按支付人筛选"></div>
+              </details>
+              <button type="button" class="bill-filter-reset" id="bill-filter-reset">重置</button>
+              <button type="button" class="bill-filter-share" id="bill-filter-share">创建分享链接</button>
+            </div>
+          </div>
+
+          <!-- 共享模式 banner(只读,不可改条件) -->
+          <div class="shared-banner" id="shared-banner" hidden>
+            <div>
+              <strong>已筛选共享视图</strong>
+              <span id="shared-banner-desc">—</span>
+            </div>
+          </div>
+
           <div class="receipt-feed" id="bill-list"><p class="receipt-empty">还没有票据<br>记下第一次新增或续费</p></div>
           <footer class="receipt-foot">人民币 CNY · 云端账本<br>THANK YOU FOR KEEPING WATCH</footer>
         </section>

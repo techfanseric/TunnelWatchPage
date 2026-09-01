@@ -56,7 +56,11 @@ let lastHistoryHours = null;
 let worldGeoFeatures = null;
 let bills = [];
 let billSources = [];
+let knownPayers = [];   // 从历史 bills 里聚合出来的去重支付人列表(下拉用)
+let currentFilter = { paidFrom: '', paidTo: '', payers: [] };  // 活跃筛选条件
 const sharedBillToken = new URLSearchParams(location.search).get('bill');
+const sharedFilterToken = new URLSearchParams(location.search).get('share');
+const isSharedView = !!sharedFilterToken;
 
 // URL 参数: ?hours=24|168|720 — 让链接可携带视角(分享/截屏固定)
 // ?device=<uuid> — 跳过 loadDevices 默认选择
@@ -178,7 +182,7 @@ async function loadDevices() {
       currentDevice = sel.value;
       localStorage.setItem('tw_device', currentDevice);
       refreshAll();
-      if (!sharedBillToken) loadBills();
+      if (!sharedBillToken && !isSharedView) loadBills();
       loadBillSources();
     });
     // 默认选上次记忆的,否则第一个
@@ -188,7 +192,11 @@ async function loadDevices() {
     currentDevice = target.uuid;
     await Promise.all([
       refreshAll(),
-      sharedBillToken ? loadSharedBill(sharedBillToken) : loadBills(),
+      sharedBillToken
+        ? loadSharedBill(sharedBillToken)
+        : isSharedView
+          ? loadSharedFilter(sharedFilterToken)
+          : loadBills(),
       loadBillSources(),
     ]);
   } catch (e) {
@@ -1004,7 +1012,11 @@ function wireBilling() {
   document.getElementById('bill-cancel').addEventListener('click', closeBillForm);
   document.getElementById('bill-source').addEventListener('change', (e) => {
     const source = billSources.find((s) => s.key === e.target.value);
-    if (source) document.getElementById('bill-name').value = source.name;
+    // 选了一个真实订阅源 → 自动切到 "续费"(用户仍然可以手动切回 "新增")
+    if (source) {
+      document.getElementById('bill-name').value = source.name;
+      document.getElementById('bill-type').value = 'renewal';
+    }
   });
   unlimited.addEventListener('change', syncUnlimitedField);
   form.addEventListener('submit', submitBill);
@@ -1017,6 +1029,77 @@ function wireBilling() {
     if (button.dataset.billAction === 'share') shareBill(bill);
     if (button.dataset.billAction === 'delete') deleteBill(bill);
   });
+  // 支付人多选下拉 — checkbox 变更同步
+  document.getElementById('bill-filter-payers').addEventListener('change', (e) => {
+    const cb = e.target.closest('input[type="checkbox"][data-payer]');
+    if (!cb) return;
+    const payer = cb.dataset.payer;
+    const idx = currentFilter.payers.indexOf(payer);
+    if (cb.checked && idx < 0) currentFilter.payers.push(payer);
+    else if (!cb.checked && idx >= 0) currentFilter.payers.splice(idx, 1);
+    updatePayerDropdownLabel();
+    applyClientFilter();
+  });
+
+  // 筛选面板 — 共享视图里整块隐藏,这里不用绑
+  if (isSharedView) return;
+  document.getElementById('bill-filter-from').addEventListener('change', (e) => {
+    currentFilter.paidFrom = e.target.value;
+    applyClientFilter();
+  });
+  document.getElementById('bill-filter-to').addEventListener('change', (e) => {
+    currentFilter.paidTo = e.target.value;
+    applyClientFilter();
+  });
+  document.getElementById('bill-filter-reset').addEventListener('click', () => {
+    currentFilter = { paidFrom: '', paidTo: '', payers: [] };
+    document.getElementById('bill-filter-from').value = '';
+    document.getElementById('bill-filter-to').value = '';
+    document.getElementById('bill-filter-payers').querySelectorAll('input[type="checkbox"]')
+      .forEach((cb) => { cb.checked = false; });
+    updatePayerDropdownLabel();
+    applyClientFilter();
+  });
+  document.getElementById('bill-filter-share').addEventListener('click', createFilterShareLink);
+}
+
+// 从 bills 历史聚合去重支付人(下拉候选)
+function refreshPayerOptions() {
+  const list = document.getElementById('bill-payer-options');
+  if (!list) return;
+  const seen = new Set();
+  bills.forEach((b) => { if (b.payer) seen.add(b.payer.trim()); });
+  // 也把最近一次填过的支付人补进来(已保存的也覆盖)
+  const last = localStorage.getItem('tw_bill_payer');
+  if (last) seen.add(last.trim());
+  knownPayers = Array.from(seen).filter(Boolean).sort((a, b) => a.localeCompare(b, 'zh-CN'));
+  list.innerHTML = knownPayers.map((p) => `<option value="${escapeHtml(p)}"></option>`).join('');
+}
+
+function refreshPayerChips() {
+  const root = document.getElementById('bill-filter-payers');
+  if (!root) return;
+  if (!knownPayers.length) {
+    root.innerHTML = '<div class="payer-empty">还没有支付人记录</div>';
+    updatePayerDropdownLabel();
+    return;
+  }
+  root.innerHTML = knownPayers.map((p) => {
+    const checked = currentFilter.payers.includes(p);
+    return `<label class="payer-option"><input type="checkbox" data-payer="${escapeHtml(p)}"${checked ? ' checked' : ''}>${escapeHtml(p)}</label>`;
+  }).join('');
+  updatePayerDropdownLabel();
+}
+
+function updatePayerDropdownLabel() {
+  const label = document.getElementById('payer-dropdown-label');
+  if (!label) return;
+  const n = currentFilter.payers.length;
+  label.textContent = n === 0 ? '支付人 · 全部' : `支付人 · 已选 ${n}`;
+}
+
+function applyClientFilter() {
+  renderBills();
 }
 
 function localISODate(date = new Date()) {
@@ -1084,9 +1167,75 @@ async function loadBills() {
     const res = await fetch('/api/bills', { headers: { 'X-Device-Uuid': currentDevice } });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     bills = (await res.json()).bills || [];
-    renderBills();
+    refreshPayerOptions();
+    refreshPayerChips();
+    applyClientFilter();
   } catch (e) {
     document.getElementById('bill-list').innerHTML = `<p class="receipt-empty">账本读取失败<br>${escapeHtml(e.message)}</p>`;
+  }
+}
+
+async function loadSharedFilter(token) {
+  try {
+    const res = await fetch(`/api/bills/share-filter/${encodeURIComponent(token)}`);
+    if (!res.ok) throw new Error('分享筛选不存在或已失效');
+    const data = await res.json();
+    bills = data.bills || [];
+    // 共享视图:只展示账本,隐藏主面板 / view-switcher / device-picker / footer
+    document.body.classList.add('is-share-mode');
+    showSharedBanner(data.filters);
+    document.getElementById('bill-filter').hidden = true;
+    document.getElementById('bill-add').hidden = true;
+    document.querySelector('.receipt-kicker').textContent = 'SHARED RECEIPT';
+    renderBills(true);
+  } catch (e) {
+    document.getElementById('bill-list').innerHTML = `<p class="receipt-empty">${escapeHtml(e.message)}</p>`;
+  }
+}
+
+function showSharedBanner(filters) {
+  const banner = document.getElementById('shared-banner');
+  const desc = document.getElementById('shared-banner-desc');
+  const parts = [];
+  if (filters.paidFrom || filters.paidTo) {
+    parts.push(`${filters.paidFrom || '不限'} → ${filters.paidTo || '不限'}`);
+  }
+  if (filters.payers && filters.payers.length) {
+    parts.push(`支付人: ${filters.payers.join(' / ')}`);
+  }
+  desc.textContent = parts.length ? parts.join(' · ') : '全部票据';
+  banner.hidden = false;
+}
+
+async function createFilterShareLink() {
+  if (!currentDevice) return;
+  const filters = {
+    paidFrom: currentFilter.paidFrom || null,
+    paidTo: currentFilter.paidTo || null,
+    payers: currentFilter.payers.slice(),
+  };
+  try {
+    const res = await fetch('/api/bills/share-filter', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Device-Uuid': currentDevice },
+      body: JSON.stringify(filters),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    const url = data.shareUrl;
+    // 只发纯 URL(用户要求);Web Share API 不带 text,降级到剪贴板也只放 URL
+    try {
+      if (navigator.share) {
+        await navigator.share({ url });
+      } else {
+        await navigator.clipboard.writeText(url);
+        setFooter('分享链接已复制', true);
+      }
+    } catch (e) {
+      if (e.name !== 'AbortError') throw e;
+    }
+  } catch (e) {
+    setFooter('创建分享失败: ' + e.message, false);
   }
 }
 
@@ -1133,8 +1282,10 @@ async function submitBill(event) {
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
     localStorage.setItem('tw_bill_payer', payload.payer.trim());
     bills.unshift(data.bill);
+    refreshPayerOptions();
+    refreshPayerChips();
     closeBillForm();
-    renderBills();
+    applyClientFilter();
     document.getElementById('receipt-paper').scrollTo({ top: 0, behavior: 'smooth' });
   } catch (e) {
     status.textContent = e.message;
@@ -1143,20 +1294,34 @@ async function submitBill(event) {
   }
 }
 
+function filterBillsForView(all) {
+  // 共享模式(后端已经按 filter 筛过)直接全收;否则按 currentFilter 本地再筛一次
+  if (isSharedView || sharedBillToken) return all;
+  return all.filter((b) => {
+    if (currentFilter.paidFrom && b.paidOn < currentFilter.paidFrom) return false;
+    if (currentFilter.paidTo && b.paidOn > currentFilter.paidTo) return false;
+    if (currentFilter.payers.length && !currentFilter.payers.includes(b.payer)) return false;
+    return true;
+  });
+}
+
 function renderBills(shared = false) {
   const list = document.getElementById('bill-list');
-  const totalFen = bills.reduce((sum, bill) => sum + bill.amountFen, 0);
-  document.getElementById('receipt-count').textContent = `NO. ${String(bills.length).padStart(3, '0')}`;
+  const view = filterBillsForView(bills);
+  const totalFen = view.reduce((sum, bill) => sum + bill.amountFen, 0);
+  document.getElementById('receipt-count').textContent = `NO. ${String(view.length).padStart(3, '0')}`;
   document.getElementById('receipt-total').textContent = formatRmb(totalFen);
-  if (!bills.length) {
-    list.innerHTML = '<p class="receipt-empty">还没有票据<br>记下第一次新增或续费</p>';
+  document.getElementById('receipt-summary-label').textContent =
+    isSharedView || sharedBillToken || hasActiveFilter() ? '当前视图合计' : '累计支出';
+  if (!view.length) {
+    list.innerHTML = '<p class="receipt-empty">没有匹配的票据<br>调整筛选条件或记一笔</p>';
     return;
   }
-  list.innerHTML = bills.map((bill, index) => `
+  list.innerHTML = view.map((bill, index) => `
     <article class="receipt-entry" style="animation-delay:${Math.min(index * 30, 180)}ms">
       <div class="receipt-entry-head"><strong>${escapeHtml(bill.subscriptionName)}</strong><span>#${String(bill.id).padStart(5, '0')}</span></div>
       <div class="receipt-kind">${bill.entryType === 'renewal' ? 'RENEWAL / 续费' : 'NEW / 新增'}</div>
-      <div class="receipt-line"><span>支付</span><b>${escapeHtml(bill.paidOn)}</b></div>
+      <div class="receipt-line receipt-paid-on"><span>支付时间</span><b>${escapeHtml(bill.paidOn)}</b></div>
       <div class="receipt-line"><span>支付人</span><b>${escapeHtml(bill.payer)}</b></div>
       <div class="receipt-line"><span>周期</span><b>${bill.unlimited ? '不限时间' : `${escapeHtml(bill.startsOn)} → ${escapeHtml(bill.expiresOn)}`}</b></div>
       ${bill.note ? `<div class="receipt-line"><span>备注</span><b>${escapeHtml(bill.note)}</b></div>` : ''}
@@ -1167,6 +1332,10 @@ function renderBills(shared = false) {
         <button data-bill-action="delete" data-bill-id="${bill.id}">删除</button>
       </div>`}
     </article>`).join('');
+}
+
+function hasActiveFilter() {
+  return !!(currentFilter.paidFrom || currentFilter.paidTo || currentFilter.payers.length);
 }
 
 async function shareBill(bill) {
@@ -1190,7 +1359,9 @@ async function deleteBill(bill) {
     return;
   }
   bills = bills.filter((item) => item.id !== bill.id);
-  renderBills();
+  refreshPayerOptions();
+  refreshPayerChips();
+  applyClientFilter();
 }
 
 function formatRmb(fen) {

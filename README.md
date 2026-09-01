@@ -132,12 +132,23 @@ Response: `{ device, hours, kind, items: [{ id, ts, kind, summary }, ...] }`
 
 ### 账单 API
 
-- `GET /api/bills`：列出个人云端账本，需要 `X-Device-Uuid`。
+- `GET /api/bills`：列出个人云端账本，需要 `X-Device-Uuid`；响应同时返回去重 `payers` 列表，供前端下拉候选。
 - `POST /api/bills`：新增一张“新增 / 续费”票据；金额使用人民币分，`unlimited=true` 时不传到期日。
 - `PUT /api/bills/:id` / `DELETE /api/bills/:id`：修改或删除票据，需要已登记设备 UUID。
 - `GET /api/bills/share/:token`：只返回可分享字段，不泄露设备 UUID、订阅 URL 或分享令牌。
+- `POST /api/bills/share-filter`：根据筛选条件（`paidFrom` / `paidTo` / `payers[]`）创建一条只读分享链接，返回 `{ token, filters, shareUrl }`。
+- `GET /api/bills/share-filter/:token`：返回该链接的筛选条件 + 脱敏票据列表（同样不暴露设备 / token / 订阅 URL）。
 
 账单首版使用显式 `owner_id=personal`，为后续多用户迁移保留所有权边界；当前写权限仍沿用设备白名单。
+
+> 路线图：当前是单人单设备；后续会接入多用户、多设备。`bills` / `bill_share_filters` 已经按 `owner_id` 隔离，迁移到账号体系时表结构不需要大改；新设备/新用户加入时只需要新增 `devices` 关联 + 切换鉴权来源（设备白名单 → 登录态）。
+
+### 部署时需要执行的新 migration
+
+```bash
+# 0003 增加账单筛选分享链接表
+npx wrangler d1 execute tunnelwatch --remote --file=migrations/0003_bill_share_filters.sql
+```
 
 ## 部署到 pages.dev
 
@@ -195,6 +206,12 @@ npx wrangler pages deploy public --project-name=tunnelwatch
 
 ```bash
 npx wrangler d1 execute tunnelwatch --remote --file=migrations/0002_billing.sql
+```
+
+后续增加的"账单筛选分享链接"表：
+
+```bash
+npx wrangler d1 execute tunnelwatch --remote --file=migrations/0003_bill_share_filters.sql
 ```
 
 ### 3. 注册设备 UUID 到远程 D1

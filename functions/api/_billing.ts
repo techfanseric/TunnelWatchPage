@@ -36,6 +36,55 @@ export type BillInput = {
 
 export const PERSONAL_OWNER = 'personal';
 
+export interface BillFilters {
+  paidFrom: string | null;
+  paidTo: string | null;
+  payers: string[];
+}
+
+export const EMPTY_FILTERS: BillFilters = { paidFrom: null, paidTo: null, payers: [] };
+
+export function parseFilters(body: unknown): { value?: BillFilters; error?: Response } {
+  if (body == null) return { value: { ...EMPTY_FILTERS } };
+  if (typeof body !== 'object') return { error: json({ error: 'filters must be an object' }, 400) };
+  const src = body as Record<string, unknown>;
+  const paidFrom = parseDate(src.paidFrom);
+  if (src.paidFrom != null && src.paidFrom !== '' && paidFrom == null) {
+    return { error: json({ error: 'paidFrom must be YYYY-MM-DD' }, 400) };
+  }
+  const paidTo = parseDate(src.paidTo);
+  if (src.paidTo != null && src.paidTo !== '' && paidTo == null) {
+    return { error: json({ error: 'paidTo must be YYYY-MM-DD' }, 400) };
+  }
+  if (paidFrom && paidTo && paidFrom > paidTo) {
+    return { error: json({ error: 'paidFrom must not be after paidTo' }, 400) };
+  }
+  const rawPayers = Array.isArray(src.payers) ? src.payers : [];
+  if (!rawPayers.every((p) => typeof p === 'string')) {
+    return { error: json({ error: 'payers must be a string array' }, 400) };
+  }
+  const payers = Array.from(new Set(rawPayers.map((p) => p.trim()).filter((p) => p.length > 0).slice(0, 30))).slice(0, 30);
+  if (rawPayers.length > 30) return { error: json({ error: 'too many payers (max 30)' }, 400) };
+  const cleaned: BillFilters = {
+    paidFrom: paidFrom ?? null,
+    paidTo: paidTo ?? null,
+    payers,
+  };
+  return { value: cleaned };
+}
+
+export function buildFilterWhere(owner: string, filters: BillFilters): { sql: string; binds: unknown[] } {
+  const where: string[] = ['owner_id = ?'];
+  const binds: unknown[] = [owner];
+  if (filters.paidFrom) { where.push('paid_on >= ?'); binds.push(filters.paidFrom); }
+  if (filters.paidTo) { where.push('paid_on <= ?'); binds.push(filters.paidTo); }
+  if (filters.payers.length) {
+    where.push(`payer IN (${filters.payers.map(() => '?').join(',')})`);
+    binds.push(...filters.payers);
+  }
+  return { sql: where.join(' AND '), binds };
+}
+
 export function json(obj: unknown, status = 200): Response {
   return new Response(JSON.stringify(obj), {
     status,
