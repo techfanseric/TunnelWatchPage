@@ -43,7 +43,7 @@
       align-items: center;
     }
     .region-row .rr-ring {
-      flex: 0 0 56px;
+      flex: 0 0 44px;
       position: relative;
       width: 44px;
       height: 44px;
@@ -53,22 +53,16 @@
       position: absolute;
       inset: 0;
       display: flex;
-      flex-direction: column;
       align-items: center;
       justify-content: center;
-      font-size: 8px;
+      font-size: 6px;
       font-weight: 700;
-      line-height: 1.05;
+      line-height: 1;
       color: var(--text, #1F2937);
       font-variant-numeric: tabular-nums;
-      letter-spacing: -0.2px;
-      text-align: center;
+      letter-spacing: -0.3px;
+      white-space: nowrap;
       pointer-events: none;
-    }
-    .region-row .rr-ring-label .rr-ring-total {
-      font-size: 7px;
-      font-weight: 500;
-      color: var(--meta, #666666);
     }
     .region-row .rr-info {
       flex: 0 0 80px;
@@ -161,8 +155,72 @@
       align-items: center;
       gap: 8px;
     }
+
+    /* 世界地图(按 p50 染色的国家分布) */
+    .world-map-card { position: relative; }
+    .world-map-card .map-wrap {
+      position: relative;
+      min-height: 400px;
+    }
+    .world-map-card svg {
+      width: 100%;
+      height: auto;
+      display: block;
+      background: #F8FAFC;
+      border-radius: 6px;
+    }
+    .world-map-card .country {
+      fill: var(--country-fill, #E5E7EB);
+      stroke: #CBD5E1;
+      stroke-width: 0.5;
+      transition: fill 0.15s, stroke 0.15s;
+    }
+    .world-map-card .country.has-data { cursor: pointer; }
+    .world-map-card .country.has-data:hover {
+      stroke: #0F4C81;
+      stroke-width: 1.5;
+    }
+    #world-map-tip {
+      position: absolute;
+      padding: 4px 8px;
+      background: rgba(15, 23, 42, 0.92);
+      color: #fff;
+      font-size: 11px;
+      border-radius: 4px;
+      pointer-events: none;
+      white-space: nowrap;
+      z-index: 100;
+      transform: translate(-50%, -120%);
+      opacity: 0;
+      transition: opacity 0.12s;
+    }
+    #world-map-tip.visible { opacity: 1; }
+    .world-map-card .map-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 10px;
+      font-size: 11px;
+      color: var(--meta, #666666);
+    }
+    .world-map-card .map-legend .swatch {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+      margin-right: 4px;
+      vertical-align: -1px;
+    }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <script type="importmap">
+    {
+      "imports": {
+        "d3-geo": "https://cdn.jsdelivr.net/npm/d3-geo@3.1.1/+esm",
+        "topojson-client": "https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/+esm"
+      }
+    }
+  </script>
 </head>
 <body>
   <main class="page">
@@ -199,7 +257,13 @@
       <section class="chart-card" id="renewal-card">
         <div class="chart-card-head">
           <h2>续费建议榜</h2>
-          <span class="chart-hint">按综合分降序 · 实时(最新快照)</span>
+          <div class="head-right">
+            <span class="chart-hint" id="renewal-hint">按综合分降序 · 实时(最新快照)</span>
+            <div class="view-switcher" id="renewal-sort-switcher" role="tablist" aria-label="续费排序">
+              <button type="button" data-sort="expiry" class="active" role="tab" aria-selected="true">快到期</button>
+              <button type="button" data-sort="score"  role="tab" aria-selected="false">推荐高</button>
+            </div>
+          </div>
         </div>
         <div id="renewal-list">— 暂无数据 —</div>
       </section>
@@ -210,13 +274,32 @@
           <h2>按地区</h2>
           <div class="head-right">
             <span class="chart-hint" id="region-hint">当前快照 · OK 率 + p50 + 最快 ⚡ / 最慢 🐌</span>
-            <div class="view-switcher" id="region-sort-switcher" role="tablist" aria-label="节点数排序">
-              <button type="button" data-sort="desc" class="active" role="tab" aria-selected="true">↓ 节点数</button>
-              <button type="button" data-sort="asc"  role="tab" aria-selected="false">↑ 节点数</button>
+            <div class="view-switcher" id="region-sort-switcher" role="tablist" aria-label="地区排序">
+              <button type="button" data-sort="count" class="active" role="tab" aria-selected="true">充裕在前</button>
+              <button type="button" data-sort="latency" role="tab" aria-selected="false">⚡ 延迟快</button>
             </div>
           </div>
         </div>
         <div class="region-list" id="region-list">— 暂无数据 —</div>
+      </section>
+
+      <!-- 世界地图 — 按地区 regionStats 按 p50 染色(24h 用 latest,7d/30d 用 history) -->
+      <section class="world-map-card chart-card" id="world-map-card">
+        <div class="chart-card-head">
+          <h2>世界地图</h2>
+          <span class="chart-hint" id="world-map-hint">24h · 按地区 p50 染色</span>
+        </div>
+        <div class="map-wrap">
+          <svg id="world-map" viewBox="0 0 960 600" preserveAspectRatio="xMidYMid meet" aria-label="节点世界分布"></svg>
+          <div id="world-map-tip"></div>
+        </div>
+        <div class="map-legend">
+          <span><span class="swatch" style="background:#22C55E"></span>p50 &lt; 50ms</span>
+          <span><span class="swatch" style="background:#F59E0B"></span>50–150ms</span>
+          <span><span class="swatch" style="background:#EF4444"></span>≥ 150ms</span>
+          <span><span class="swatch" style="background:#9CA3AF"></span>不可用</span>
+          <span><span class="swatch" style="background:#E5E7EB;border:1px solid #CBD5E1"></span>无数据</span>
+        </div>
       </section>
 
       <!-- 协议分布(pie) -->

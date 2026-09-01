@@ -4,7 +4,12 @@
 // - 拉 /api/history 渲染 4 张图
 // - 60 秒自动刷新
 
+import { feature } from 'topojson-client';
+import { geoNaturalEarth1, geoPath } from 'd3-geo';
+
 const REFRESH_MS = 60_000;
+// 世界地图 TopoJSON 来源(importmap 把 d3-geo/topojson-client 解析到 jsdelivr ESM,JSON 走 fetch 避免 MIME 限制)
+const WORLD_TOPO_URL = '/vendor/world-50m.json';
 // Chart.js 不解析 CSS var(),要写 hex
 const COLORS = {
   primary: '#0F4C81',
@@ -25,7 +30,8 @@ const CHART_PALETTE = [
 // ---------- 状态 ----------
 let currentDevice = null;     // uuid
 let currentHours = 24;        // 时间窗:24 / 168 / 720(24h / 7d / 30d)
-let currentRegionSort = 'desc'; // 按地区 排序:'desc' 充裕在前(节点数多)/ 'asc' 稀缺在前
+let currentRegionSort = 'count';    // 按地区 排序:'count' 充裕在前(节点数降序) / 'latency' ⚡延迟快(p50 升序)
+let currentRenewalSort = 'expiry';  // 续费建议榜 排序:'expiry' 快到期(到期天数升序) / 'score' 推荐高(综合分降序)
 let charts = {
   okRate: null, subOkRate: null, traffic: null, latency: null,
   subConn: null, regionLatency: null, protocol: null,
@@ -36,6 +42,18 @@ let charts = {
 const HOURS_BUCKET_MIN = { 24: 15, 168: 60, 720: 240 };
 // 时间窗 → 卡片标题显示(24h / 7d / 30d)
 const HOURS_LABEL = { 24: '24h', 168: '7d', 720: '30d' };
+// regionStats key(emoji 头)→ ISO 3166-1 数字代码(用于世界地图国家定位)
+const REGION_TO_ISO = {
+  HK: '344', JP: '392', TW: '158', SG: '702', KR: '410',
+  UK: '826', US: '840', IN: '356', AU: '036', DE: '276',
+  MY: '458', TH: '764', VN: '704', TR: '792',
+  CN: '156',
+};
+// 缓存最近一次 history fetch(7d/30d 地图复用)
+let lastHistoryItems = null;
+let lastHistoryHours = null;
+// 缓存 world-atlas GeoJSON(50m,模块加载完就解析一次)
+let worldGeoFeatures = null;
 
 // URL 参数: ?hours=24|168|720 — 让链接可携带视角(分享/截屏固定)
 // ?device=<uuid> — 跳过 loadDevices 默认选择
@@ -52,6 +70,7 @@ init();
 async function init() {
   wireViewSwitcher();
   wireRegionSortSwitcher();
+  wireRenewalSortSwitcher();
   syncViewSwitcherActive();   // URL 参数 / default 同步到按钮高亮
   updateChartTitles();   // 初始化时就把 {H} 占位符替换掉(默认 24h)
   updateBucketHint(HOURS_BUCKET_MIN[currentHours] || 15);
@@ -84,11 +103,11 @@ function wireViewSwitcher() {
       b.setAttribute('aria-selected', active ? 'true' : 'false');
     });
     updateChartTitles();
-    refreshAll();
+    refreshAll();   // refreshAll 末尾会调 renderWorldMapCard(避免重复 fetch)
   });
 }
 
-// "按地区" 卡片头右侧的 "↓ 节点数 / ↑ 节点数" 切换 — 切排序后只重渲这一张卡
+// "按地区" 卡片头右侧的 "充裕在前 / ⚡ 延迟快" 切换 — 切排序后只重渲这一张卡
 function wireRegionSortSwitcher() {
   const root = document.getElementById('region-sort-switcher');
   if (!root) return;
@@ -104,6 +123,25 @@ function wireRegionSortSwitcher() {
       b.setAttribute('aria-selected', active ? 'true' : 'false');
     });
     renderRegionCard();
+  });
+}
+
+// "续费建议榜" 卡片头右侧的 "快到期 / 推荐高" 切换 — 切排序后只重渲这一张卡
+function wireRenewalSortSwitcher() {
+  const root = document.getElementById('renewal-sort-switcher');
+  if (!root) return;
+  root.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-sort]');
+    if (!btn) return;
+    const s = btn.dataset.sort;
+    if (s === currentRenewalSort) return;
+    currentRenewalSort = s;
+    [...root.querySelectorAll('button')].forEach(b => {
+      const active = b === btn;
+      b.classList.toggle('active', active);
+      b.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    renderRenewalCard();
   });
 }
 
@@ -157,6 +195,7 @@ async function refreshAll() {
     renderProtocolChart(),
     renderCharts(currentHours),
   ]);
+  renderWorldMapCard();
   setFooter('已刷新 · ' + new Date().toLocaleTimeString('zh-CN', { hour12: false }), true);
 }
 
@@ -305,20 +344,32 @@ async function renderRegionCard() {
     };
     const statusRank = { abundant: 3, sufficient: 2, scarce: 1, missing: 0 };
     // 排序:
-    //   desc(默认 · 充裕在前):count desc,然后 status desc
-    //   asc(稀缺在前):count asc,然后 status asc
-    const dir = currentRegionSort === 'desc' ? 1 : -1;
-    entries.sort((a, b) => {
-      const dr = (b[1].total - a[1].total) * dir;
-      if (dr !== 0) return dr;
-      return (statusRank[statusOf(b[1])] - statusRank[statusOf(a[1])]) * dir;
-    });
+    //   count(默认 · 充裕在前):total desc,然后 status desc
+    //   latency(⚡ 延迟快):p50 asc(null 排到末尾),平手时 total desc
+    if (currentRegionSort === 'latency') {
+      entries.sort((a, b) => {
+        const pa = a[1].p50, pb = b[1].p50;
+        const aNull = pa == null, bNull = pb == null;
+        if (aNull && bNull) return (b[1].total - a[1].total);
+        if (aNull) return 1;          // null 排后
+        if (bNull) return -1;
+        if (pa !== pb) return pa - pb;
+        return (b[1].total - a[1].total);
+      });
+    } else {
+      // count(充裕在前):count desc,然后 status desc
+      entries.sort((a, b) => {
+        const dr = b[1].total - a[1].total;
+        if (dr !== 0) return dr;
+        return statusRank[statusOf(b[1])] - statusRank[statusOf(a[1])];
+      });
+    }
     // 切换 tab 时同步右侧 hint 文案
     const hint = document.getElementById('region-hint');
     if (hint) {
-      hint.textContent = currentRegionSort === 'desc'
-        ? '充裕在前 · 节点数降序'
-        : '稀缺在前 · 节点数升序';
+      hint.textContent = currentRegionSort === 'latency'
+        ? '⚡ 延迟快 · p50 升序'
+        : '充裕在前 · 节点数降序';
     }
     document.getElementById('region-list').innerHTML = entries.map(([region, v]) => {
       const pct = v.ok / v.total;          // 0~1
@@ -330,7 +381,7 @@ async function renderRegionCard() {
       //   >80%  → 绿 OK 段 + 浅灰失败段
       //   50-80% → 绿 OK 段 + 橙失败段
       //   <50%  → 绿 OK 段 + 红失败段
-      const R = 14;                       // ring radius
+      const R = 16;                       // ring radius
       const C = 2 * Math.PI * R;          // circumference
       const okLen = (pct * C).toFixed(2);
       const failLen = (C - pct * C).toFixed(2);
@@ -339,14 +390,14 @@ async function renderRegionCard() {
       else if (pct < 0.8) failColor = COLORS.warn;
       // 全绿时只画一段;否则 OK 段在前(从 12 点方向顺时针),失败段接上
       const ringSvg = (pct >= 1)
-        ? `<svg viewBox="0 0 36 36" width="44" height="44">
-             <circle cx="18" cy="18" r="${R}" fill="none" stroke="${COLORS.ok}" stroke-width="4"/>
+        ? `<svg viewBox="0 0 40 40" width="44" height="44">
+             <circle cx="20" cy="20" r="${R}" fill="none" stroke="${COLORS.ok}" stroke-width="3.5"/>
            </svg>`
-        : `<svg viewBox="0 0 36 36" width="44" height="44">
-             <circle cx="18" cy="18" r="${R}" fill="none" stroke="${failColor}" stroke-width="4"/>
-             <circle cx="18" cy="18" r="${R}" fill="none" stroke="${COLORS.ok}" stroke-width="4"
+        : `<svg viewBox="0 0 40 40" width="44" height="44">
+             <circle cx="20" cy="20" r="${R}" fill="none" stroke="${failColor}" stroke-width="3.5"/>
+             <circle cx="20" cy="20" r="${R}" fill="none" stroke="${COLORS.ok}" stroke-width="3.5"
                      stroke-dasharray="${okLen} ${failLen}" stroke-dashoffset="${(C / 4).toFixed(2)}"
-                     transform="rotate(-90 18 18)" stroke-linecap="butt"/>
+                     transform="rotate(-90 20 20)" stroke-linecap="butt"/>
            </svg>`;
 
       // 最快/最慢 — 0 OK 时都为 null
@@ -387,7 +438,7 @@ async function renderRegionCard() {
       return `<div class="region-row">
         <div class="rr-ring" title="${v.ok}/${v.total} OK · ${okPct.toFixed(0)}%">
           ${ringSvg}
-          <span class="rr-ring-label"><span>${v.ok}</span><span class="rr-ring-total">/${v.total}</span></span>
+          <span class="rr-ring-label">${v.ok}/${v.total}</span>
         </div>
         <div class="rr-info">
           <div class="rr-name" title="${escapeHtml(region)}">${escapeHtml(region)}</div>
@@ -451,7 +502,32 @@ async function renderRenewalCard() {
       consider: COLORS.warn,
       replace: COLORS.err,
     };
-    document.getElementById('renewal-list').innerHTML = scores.map(s => {
+    // 排序:
+    //   expiry(默认 · 快到期):daysToExpire asc(长期有效排后,平手按 score desc)
+    //   score(推荐高):score desc(平手按 daysToExpire asc)
+    const sortedScores = scores.slice().sort((a, b) => {
+      if (currentRenewalSort === 'score') {
+        const ds = (b.score ?? 0) - (a.score ?? 0);
+        if (ds !== 0) return ds;
+        const ad = a.daysToExpire == null ? Infinity : a.daysToExpire;
+        const bd = b.daysToExpire == null ? Infinity : b.daysToExpire;
+        return ad - bd;
+      } else {
+        // expiry
+        const ad = a.daysToExpire == null ? Infinity : a.daysToExpire;
+        const bd = b.daysToExpire == null ? Infinity : b.daysToExpire;
+        if (ad !== bd) return ad - bd;
+        return (b.score ?? 0) - (a.score ?? 0);
+      }
+    });
+    // 切换 tab 时同步右侧 hint 文案
+    const hint = document.getElementById('renewal-hint');
+    if (hint) {
+      hint.textContent = currentRenewalSort === 'score'
+        ? '推荐高 · 综合分降序 · 实时(最新快照)'
+        : '快到期 · 到期天数升序 · 实时(最新快照)';
+    }
+    document.getElementById('renewal-list').innerHTML = sortedScores.map(s => {
       const score = s.score ?? 0;
       const okPct = (s.okRate * 100).toFixed(0) + '%';
       const p50 = s.p50 != null ? `${s.p50}ms` : '—ms';
@@ -505,6 +581,9 @@ async function renderCharts(hours = 24) {
     const res = await fetch(`/api/history?device=${currentDevice}&hours=${hours}`);
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const { items } = await res.json();
+    // 缓存给世界地图复用(7d/30d 视角下 regionStats 不来自 /latest,要从 history 取)
+    lastHistoryItems = items;
+    lastHistoryHours = hours;
     // 服务端已按 bucket GROUP BY,每桶一个数据点;客户端再 dedup 是 no-op,但保留以防混 kind
     drawOkRate(items, bucketMin);
     drawSubOkRate(items, bucketMin);
@@ -765,6 +844,148 @@ function drawTrafficRate(items, bucketMin) {
   });
 }
 
+// ---------- 世界地图(按地区 p50 染色) ----------
+// 24h → /api/latest summary.regionStats(当前快照)
+// 7d/30d → 用 renderCharts 已经 fetch 的 history items,取最新一桶的 regionStats
+async function renderWorldMapCard() {
+  const svg = document.getElementById('world-map');
+  const hint = document.getElementById('world-map-hint');
+  const tip = document.getElementById('world-map-tip');
+  if (!svg) return;
+  if (hint) hint.textContent = `${HOURS_LABEL[currentHours] || '24h'} · 按地区 p50 染色`;
+
+  if (!currentDevice) return;
+
+  // 1. 拿到当前视角的 regionStats
+  let rs = null;
+  if (currentHours === 24) {
+    try {
+      const res = await fetch(`/api/latest?device=${currentDevice}&kind=full`);
+      if (!res.ok) return;
+      const data = await res.json();
+      rs = data.summary?.regionStats || null;
+    } catch (e) {
+      console.error('world map latest fetch failed:', e);
+      return;
+    }
+  } else {
+    // 7d/30d — 复用 renderCharts 缓存,取最新一桶
+    if (!lastHistoryItems || lastHistoryHours !== currentHours) {
+      // 没缓存就 fetch 一次
+      try {
+        const res = await fetch(`/api/history?device=${currentDevice}&hours=${currentHours}`);
+        if (!res.ok) return;
+        const { items } = await res.json();
+        lastHistoryItems = items;
+        lastHistoryHours = currentHours;
+      } catch (e) {
+        console.error('world map history fetch failed:', e);
+        return;
+      }
+    }
+    const sorted = [...lastHistoryItems].sort((a, b) => b.ts - a.ts);
+    const latestWithRegions = sorted.find(it => it.summary?.regionStats);
+    rs = latestWithRegions?.summary?.regionStats || null;
+  }
+  if (!rs) return;
+
+  // 2. 解 TopoJSON → GeoJSON(只做一次,后续复用)— 改用 fetch 而非静态 import
+  if (!worldGeoFeatures) {
+    try {
+      const worldRes = await fetch(WORLD_TOPO_URL);
+      if (!worldRes.ok) throw new Error('HTTP ' + worldRes.status);
+      const worldData = await worldRes.json();
+      worldGeoFeatures = feature(worldData, worldData.objects.countries).features;
+    } catch (e) {
+      console.error('world map topology fetch failed:', e);
+      return;
+    }
+  }
+
+  // 3. 颜色档位
+  const colorByP50 = (v) => {
+    if (v == null || (v.total != null && v.total > 0 && v.ok === 0 && v.p50 == null)) {
+      return { fill: '#9CA3AF', title: '不可用' };
+    }
+    if (v.p50 == null) return { fill: '#9CA3AF', title: '不可用' };
+    if (v.p50 < 50) return { fill: COLORS.ok, title: `${v.p50}ms · 优` };
+    if (v.p50 < 150) return { fill: COLORS.warn, title: `${v.p50}ms · 中` };
+    return { fill: COLORS.err, title: `${v.p50}ms · 差` };
+  };
+
+  // 4. 把 regionStats key("🇭🇰 HK" 等)归一化成 {ISO → 第一个匹配 region(其余合并)}
+  //   - 一个 ISO 可能被多个 region 匹配(理论上不该出现,先收集所有)
+  //   - "🌐 其他" 单独走中国色块(ISO 156)
+  const isoToRegionInfo = new Map();
+  Object.entries(rs).forEach(([region, v]) => {
+    if (v.total == null || v.total === 0) return;
+    // 剥掉 emoji(用 code-point-aware 的方式,flag 是两个 regional indicator)
+    const code = region.replace(/[\u{1F1E6}-\u{1F1FF}]/gu, '').trim().toUpperCase();
+    let iso = REGION_TO_ISO[code];
+    if (!iso) {
+      // 未知 region(比如 "🌐 其他")→ 落到中国(ISO 156)
+      iso = REGION_TO_ISO.CN;
+    }
+    const okRate = v.total > 0 ? v.ok / v.total : 0;
+    const info = { region, v, p50: v.p50, okRate, color: null, title: null };
+    const c = colorByP50(v);
+    info.color = c.fill;
+    info.title = c.title;
+    // 同一 ISO 取"节点数最多"的那个代表
+    const prev = isoToRegionInfo.get(iso);
+    if (!prev || (v.total || 0) > (prev.v.total || 0)) {
+      isoToRegionInfo.set(iso, info);
+    }
+  });
+
+  // 5. 投影 + 生成 path
+  const projection = geoNaturalEarth1().fitSize([960, 600], { type: 'Sphere' });
+  const path = geoPath(projection);
+
+  // 6. 渲染所有国家 path(先全画浅灰底,再覆盖有数据的国家)
+  const paths = worldGeoFeatures.map(feat => {
+    const iso = String(feat.id);   // topo id 是 string
+    const info = isoToRegionInfo.get(iso);
+    const fill = info ? info.color : '#E5E7EB';
+    const d = path(feat);
+    if (!d) return '';
+    const title = info
+      ? `${info.region} · p50 ${info.p50 != null ? info.p50 + 'ms' : '—'} · OK ${(info.okRate * 100).toFixed(0)}%`
+      : (feat.properties?.name || iso);
+    const dataAttrs = info
+      ? ` data-region="${escapeHtml(info.region)}" data-p50="${info.p50 != null ? info.p50 : ''}" data-ok-rate="${info.okRate.toFixed(3)}"`
+      : '';
+    const cls = info ? 'country has-data' : 'country';
+    return `<path id="c-${iso}" class="${cls}" d="${d}" style="--country-fill:${fill}" data-iso="${iso}"${dataAttrs}><title>${escapeHtml(title)}</title></path>`;
+  }).join('');
+
+  svg.innerHTML = paths;
+
+  // 7. 鼠标 hover tooltip
+  if (tip && !tip.dataset.wired) {
+    tip.dataset.wired = '1';
+    const wrap = svg.parentElement;  // .map-wrap
+    wrap.addEventListener('mousemove', (e) => {
+      const target = e.target.closest('.country.has-data');
+      if (!target) {
+        tip.classList.remove('visible');
+        return;
+      }
+      const region = target.dataset.region;
+      const p50 = target.dataset.p50;
+      const okRate = parseFloat(target.dataset.okRate);
+      tip.textContent = `${region} · p50 ${p50 !== '' ? p50 + 'ms' : '—'} · OK ${(okRate * 100).toFixed(0)}%`;
+      const rect = wrap.getBoundingClientRect();
+      tip.style.left = (e.clientX - rect.left) + 'px';
+      tip.style.top = (e.clientY - rect.top) + 'px';
+      tip.classList.add('visible');
+    });
+    wrap.addEventListener('mouseleave', () => {
+      tip.classList.remove('visible');
+    });
+  }
+}
+
 // ---------- Chart helpers ----------
 function chartUpdate(canvasId, key, config) {
   const ctx = document.getElementById(canvasId);
@@ -783,9 +1004,9 @@ function chartOpts(extra = {}) {
     maintainAspectRatio: false,
     interaction: { mode: 'index', intersect: false },
     plugins: {
-      // 12x12 方块图例 — 跟整体视觉一致(同 .empty 块、bar 图例风格)
-      // line chart 在 Chart.js v4 自动画"线 + 中点",不会因为 boxWidth 大就变"口"
-      legend: { display: true, position: 'bottom', labels: { boxWidth: 12, boxHeight: 12, font: { size: 12 }, color: COLORS.axis, padding: 8 } },
+      // 6x6 实心方块图例 — line chart 在 boxWidth=boxHeight 时会撑成"口"形小方框,
+      // 用 6x6 既保持"小色块"风格又明确显示 dataset 颜色(line + bar 都一致)
+      legend: { display: true, position: 'bottom', labels: { boxWidth: 6, boxHeight: 6, font: { size: 12 }, color: COLORS.axis, padding: 10, usePointStyle: false } },
       tooltip: { backgroundColor: '#1A1F2E', padding: 10, cornerRadius: 6, titleFont: { size: 13 }, bodyFont: { size: 12 } }
     },
     scales: {
