@@ -44,7 +44,8 @@ npm run dev
 
 ### 3. 让真机 App 上报到本地
 
-App 默认 `tw.telemetry.url` 为空(不上传)。要让它打到本地 dev:
+App 默认上报到 `https://tunnelwatch.pages.dev`。要让它临时打到本地 dev，
+可在 `local.properties` 覆盖生产默认值:
 
 **a) 在 TunnelWatch 仓库配 URL**
 ```bash
@@ -128,16 +129,27 @@ Response: `{ id, device, deviceName, kind, ts, summary, payload }`
 
 Response: `{ device, hours, kind, items: [{ id, ts, kind, summary }, ...] }`
 
-## 部署到 page.dev
+## 部署到 pages.dev
 
 把 `functions/api/ingest` 暴露到公网,让 App 不再依赖 `adb reverse`,实现"不碰手机"也能静默上传。
+
+### 当前生产环境
+
+- Pages 项目:`tunnelwatch`
+- 固定地址:`https://tunnelwatch.pages.dev`
+- D1 数据库:`tunnelwatch`
+- D1 ID:`0dc9db60-42fb-435c-921a-f5c3ec3bdefc`
+- D1 binding:`DB`(配置见 `wrangler.toml`)
+- 已登记设备:`OnePlus PHK110`
+
+`wrangler pages deploy` 每次会另外输出一个带部署 hash 的预览地址；App 和文档应始终使用上面的固定生产地址。
 
 ### 0. 前置
 
 - Cloudflare 账号(免费层即可,D1 + Pages 都含)
 - `cd ~/TunnelWatchPage && npm install` 装好 wrangler
 
-### 1. 登录 + 创建远程 D1
+### 1. 登录 + 创建远程 D1(仅新环境)
 
 ```bash
 # 1.1 登录
@@ -146,11 +158,12 @@ npx wrangler login
 
 # 1.2 建远程 D1(会输出 database_id)
 npx wrangler d1 create tunnelwatch
-# 把输出的 database_id 复制下来,填进 wrangler.toml:
+# 把输出的 database_id 复制下来,填进 wrangler.toml。
+# 当前生产环境已经配置完成,不要重复创建:
 #   [[d1_databases]]
 #   binding = "DB"
 #   database_name = "tunnelwatch"
-#   database_id = "xxxx-xxxx-xxxx-xxxx"
+#   database_id = "0dc9db60-42fb-435c-921a-f5c3ec3bdefc"
 
 # 1.3 在远程 D1 跑 schema
 npx wrangler d1 execute tunnelwatch --remote --file=migrations/0001_init.sql
@@ -162,6 +175,7 @@ npx wrangler d1 execute tunnelwatch --remote --file=migrations/0001_init.sql
 npx wrangler pages deploy public --project-name=tunnelwatch
 # 部署成功后输出:
 # ✨ Deployment complete! Take a peek over at https://<random-hash>.tunnelwatch.pages.dev
+# 固定生产地址仍是 https://tunnelwatch.pages.dev
 ```
 
 > 第一次部署前 `wrangler` 可能要求在 Cloudflare Dashboard 创建 Pages project,
@@ -180,20 +194,20 @@ $ADB shell run-as tech.tunnelwatch.app cat shared_prefs/tw_device_identity.xml \
 
 # 3.2 写入远程 D1
 npx wrangler d1 execute tunnelwatch --remote --command \
-  "INSERT INTO devices (uuid, name) VALUES ('<uuid>', '<设备名如 OnePlus PHK110>')"
+  "INSERT INTO devices (uuid, name) VALUES ('<uuid>', '<设备名如 OnePlus PHK110>') ON CONFLICT(uuid) DO UPDATE SET name=excluded.name"
 
 # 3.3 验证
 npx wrangler d1 execute tunnelwatch --remote --command "SELECT * FROM devices"
 ```
 
-### 4. App 端切到公网 URL
+### 4. App 端生产 URL
+
+`~/TunnelWatch/app/build.gradle.kts` 已把生产地址设为代码级默认值；本机
+`local.properties` 也应保持相同配置。只有联调本地 Functions 时才临时覆盖为 localhost。
 
 ```bash
-# 编辑 ~/TunnelWatch/local.properties
-# 把:
-#   tw.telemetry.url=http://localhost:8788
-# 改成:
-tw.telemetry.url=https://<your-project>.pages.dev
+# ~/TunnelWatch/local.properties
+tw.telemetry.url=https://tunnelwatch.pages.dev
 ```
 
 > 改完本地 dev 也可以继续用:wrangler `pages dev` 会在本地 8788 监听,
@@ -220,7 +234,7 @@ $ADB shell am start -n tech.tunnelwatch.app/.MainActivity
   npx wrangler d1 execute tunnelwatch --remote --command \
     "SELECT device_name, kind, ts FROM snapshots ORDER BY ts DESC LIMIT 4"
   ```
-- 公网 `GET https://<your-project>.pages.dev/api/devices` 返回 JSON 白名单
+- 公网 `GET https://tunnelwatch.pages.dev/api/devices` 返回 JSON 白名单
 
 ### 部署后的工作模式
 
@@ -230,16 +244,37 @@ $ADB shell am start -n tech.tunnelwatch.app/.MainActivity
 | WorkManager `LineProbeWorker` | 15min(best-effort) | ❌ |
 | 打开 App / 点 widget | 用户行为 | ❌ |
 
-**只要手机能上网 + widget 已加到桌面,30min 一次的 PROBE 就能自动喂饱 page.dev。**
+**只要手机能上网 + widget 已加到桌面,30min 一次的 PROBE 就能自动喂饱 pages.dev。**
 本地 dev 模式(localhost:8788 + adb reverse)只在 Mac 直连调试时使用。
 
-### 重新发布(改了 `functions/` 或 `public/` 后)
+### 日常重新发布
+
+改了 `functions/` 或 `public/` 后按下面执行。现有 Pages 项目和 D1 都不要重建；只有新增 migration 时，才先对生产 D1 执行对应的新 SQL 文件。
 
 ```bash
 cd ~/TunnelWatchPage
-npx wrangler pages deploy public --project-name=tunnelwatch
-# 几十秒完成,公网 URL 不会变
+
+# 1. 部署前检查
+npm install
+git diff --check
+
+# 2. 如有新 migration,先执行一次(没有就跳过)
+# npx wrangler d1 execute tunnelwatch --remote --file=migrations/<new_migration>.sql
+
+# 3. 发布静态文件和 Pages Functions
+npx wrangler pages deploy public \
+  --project-name=tunnelwatch \
+  --branch=main \
+  --commit-dirty=true
+
+# 4. 验证固定生产地址、API 和生产 D1
+curl -fsSI https://tunnelwatch.pages.dev/
+curl -fsS https://tunnelwatch.pages.dev/api/devices
+npx wrangler d1 execute tunnelwatch --remote --command \
+  "SELECT device_name, kind, datetime(ts/1000, 'unixepoch') AS uploaded_at_utc FROM snapshots ORDER BY ts DESC LIMIT 5"
 ```
+
+部署命令输出的 `https://<hash>.tunnelwatch.pages.dev` 是当次预览地址；对外地址和 App 配置仍保持 `https://tunnelwatch.pages.dev`。
 
 ## License
 
