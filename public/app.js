@@ -8,6 +8,9 @@ import { feature } from 'topojson-client';
 import { geoNaturalEarth1, geoPath } from 'd3-geo';
 
 const REFRESH_MS = 60_000;
+// 发版标签 — 每次 `wrangler pages deploy` 前手动 bump 一下,刷新页面看 header 是否更新 → 确认 deploy 生效
+// 格式:YYYY.MM.DD-HHMM(本地时间),不需要严格 semver,关键是要"每次发版都换字符串"
+const APP_VERSION = '2026.09.01-2152';
 // 世界地图 TopoJSON 来源(importmap 把 d3-geo/topojson-client 解析到 jsdelivr ESM,JSON 走 fetch 避免 MIME 限制)
 const WORLD_TOPO_URL = '/vendor/world-50m.json';
 // Chart.js 不解析 CSS var(),要写 hex
@@ -32,6 +35,23 @@ let currentDevice = null;     // uuid
 let currentHours = 24;        // 时间窗:24 / 168 / 720(24h / 7d / 30d)
 let currentRegionSort = 'count';    // 按地区 排序:'count' 充裕在前(节点数降序) / 'latency' ⚡延迟快(p50 升序)
 let currentRenewalSort = 'expiry';  // 续费建议榜 排序:'expiry' 快到期(到期天数升序) / 'score' 推荐高(综合分降序)
+// 订阅源连通性 / 失败节点数 两张图各支持两种视图:
+//   snapshot — x=订阅源,最新快照(每订阅源一根柱子,失败按地区堆叠)
+//   trend    — x=时间,折线看趋势(连通性:每订阅源一条线;失败节点:每地区一条线)
+// 默认 snapshot,符合用户"多少个订阅源多少个柱子"的要求
+const VIEW_STORAGE_KEY = 'tw.chartView.v1';
+function loadViewPrefs() {
+  try {
+    const raw = localStorage.getItem(VIEW_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+}
+function saveViewPrefs(prefs) {
+  try { localStorage.setItem(VIEW_STORAGE_KEY, JSON.stringify(prefs)); } catch {}
+}
+const viewPrefs = loadViewPrefs();
+let subConnView = viewPrefs.subConn || 'snapshot';     // 'snapshot' | 'trend'
+let failCountView = viewPrefs.failCount || 'snapshot'; // 'snapshot' | 'trend'
 let charts = {
   okRate: null, subOkRate: null, traffic: null, latency: null,
   subConn: null, regionLatency: null, protocol: null,
@@ -54,6 +74,20 @@ let lastHistoryItems = null;
 let lastHistoryHours = null;
 // 缓存 world-atlas GeoJSON(50m,模块加载完就解析一次)
 let worldGeoFeatures = null;
+// ---------- ETag + 304 + in-flight dedup(60s 轮询不重渲的核心) ----------
+// 同一个 URL 在同一轮 refreshAll 里有多个 render 函数并发打,用 inFlight 复用同一个 Promise
+// 命中 304 时直接返回上一次的对象引用,render 函数通过 === 对比决定要不要重渲 DOM/Chart
+const inflight = new Map();   // url -> Promise<{ data, etag }>
+const dataCache = new Map();  // url -> { data, etag }
+// 上一轮各 render 函数看到的 data 引用(用于对象身份对比:=== 即"无变化")
+const lastDataRef = {
+  mirrorFull: null,
+  mirrorProbe: null,
+  renewal: null,
+  region: null,
+  protocol: null,
+  history: null,
+};
 let bills = [];
 let billSources = [];
 let knownPayers = [];   // 从历史 bills 里聚合出来的去重支付人列表(下拉用)
@@ -74,16 +108,84 @@ const isSharedView = !!sharedFilterToken;
 // ---------- 入口 ----------
 init();
 
+// 带 ETag 的 fetch + in-flight 复用 + 304 命中返回旧引用
+// 行为契约:
+//   - 首次请求:正常发,200 后缓存 {data, etag}
+//   - 后续请求:带 If-None-Match,服务端 304 时**直接返回上一次的 data 引用**(引用相同 → render 函数用 === 即可识别"无变化")
+//   - 同 URL 并发:inFlight 复用同一个 Promise,避免一轮 refreshAll 内对 /api/latest?kind=full 打 3 次
+//   - 非 200(404/500 等):抛错,不污染缓存
+async function fetchJSON(url) {
+  if (inflight.has(url)) return inflight.get(url);
+  const cached = dataCache.get(url);
+  const headers = cached ? { 'If-None-Match': cached.etag } : {};
+  const p = (async () => {
+    const res = await fetch(url, { headers });
+    if (res.status === 304) {
+      // 服务端确认未变 → 返回旧引用(关键:引用相同 → render 函数可以 === 判断)
+      if (cached) return cached;
+      // 边界:第一次就 304(不会发生,服务端只在有缓存时 304),保护性抛错
+      throw new Error('304 without prior cache');
+    }
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    const entry = { data, etag: res.headers.get('ETag') };
+    dataCache.set(url, entry);
+    return entry;
+  })();
+  inflight.set(url, p);
+  p.finally(() => inflight.delete(url));
+  return p;
+}
+
+// 设备切换 / 视角切换时清缓存(URL 变了,旧 ETag 没意义)
+function clearDataCache() {
+  dataCache.clear();
+  inflight.clear();
+  lastDataRef.mirrorFull = null;
+  lastDataRef.mirrorProbe = null;
+  lastDataRef.renewal = null;
+  lastDataRef.region = null;
+  lastDataRef.protocol = null;
+  lastDataRef.history = null;
+  // 保留 lastHistoryItems/worldGeoFeatures 这两个非 ETag 缓存(地图和 TopoJSON 还可用)
+}
+
+let refreshTimer = null;
+function startRefreshTimer() {
+  if (refreshTimer) return;
+  refreshTimer = setInterval(refreshAll, REFRESH_MS);
+}
+function stopRefreshTimer() {
+  if (!refreshTimer) return;
+  clearInterval(refreshTimer);
+  refreshTimer = null;
+}
+// 后台标签页暂停轮询(visibility 隐藏时浏览器本身会节流 setInterval,但显式停掉更可控)
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    stopRefreshTimer();
+  } else {
+    // 回到前台立刻拉一次(用户期望看到最新),再恢复定时器
+    refreshAll();
+    startRefreshTimer();
+  }
+});
+
 async function init() {
   wireBilling();
   wireViewSwitcher();
   wireRegionSortSwitcher();
   wireRenewalSortSwitcher();
+  wireChartToggles();
   syncViewSwitcherActive();   // URL 参数 / default 同步到按钮高亮
+  syncChartTogglesActive();
   updateChartTitles();   // 初始化时就把 {H} 占位符替换掉(默认 24h)
   updateBucketHint(HOURS_BUCKET_MIN[currentHours] || 15);
+  // 把发版标签塞进 header 右侧(确认 deploy 生效用)
+  const v = document.getElementById('brand-version');
+  if (v) v.textContent = 'Version. ' + APP_VERSION;
   await loadDevices();
-  setInterval(refreshAll, REFRESH_MS);
+  startRefreshTimer();
 }
 
 function syncViewSwitcherActive() {
@@ -111,7 +213,55 @@ function wireViewSwitcher() {
       b.setAttribute('aria-selected', active ? 'true' : 'false');
     });
     updateChartTitles();
+    // hours 变了 → history URL 变了,清掉旧 hours 的 lastDataRef(让新 hours 强制走 200 拉一次)
+    lastDataRef.history = null;
     refreshAll();   // refreshAll 末尾会调 renderWorldMapCard(避免重复 fetch)
+  });
+}
+
+// 订阅源连通性 / 失败节点数 两张图卡头的"最新快照 / 时间趋势"切换
+// 切完后:用缓存的 lastHistoryItems 重渲这两张图,不用重新拉 history
+function wireChartToggles() {
+  document.querySelectorAll('.seg-toggle[data-toggle]').forEach(root => {
+    const key = root.dataset.toggle; // 'sub-conn' | 'fail-count'
+    root.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-view]');
+      if (!btn) return;
+      const view = btn.dataset.view;
+      if (view !== 'snapshot' && view !== 'trend') return;
+      if (key === 'sub-conn' && view === subConnView) return;
+      if (key === 'fail-count' && view === failCountView) return;
+      if (key === 'sub-conn') subConnView = view;
+      if (key === 'fail-count') failCountView = view;
+      // 持久化
+      viewPrefs.subConn = subConnView;
+      viewPrefs.failCount = failCountView;
+      saveViewPrefs(viewPrefs);
+      // 同步高亮
+      syncChartTogglesActive();
+      // 用缓存重渲两张图(不重新拉 history)
+      const bucketMin = HOURS_BUCKET_MIN[currentHours] || 15;
+      if (lastHistoryItems && lastHistoryItems.length > 0) {
+        if (key === 'sub-conn') drawSubConn(lastHistoryItems, bucketMin);
+        if (key === 'fail-count') drawFailCount(lastHistoryItems, bucketMin);
+      } else {
+        // 没缓存,走全量 refresh
+        refreshAll();
+      }
+    });
+  });
+}
+
+function syncChartTogglesActive() {
+  document.querySelectorAll('.seg-toggle[data-toggle]').forEach(root => {
+    const key = root.dataset.toggle;
+    const cur = key === 'sub-conn' ? subConnView : key === 'fail-count' ? failCountView : null;
+    if (!cur) return;
+    root.querySelectorAll('button[data-view]').forEach(b => {
+      const active = b.dataset.view === cur;
+      b.classList.toggle('active', active);
+      b.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
   });
 }
 
@@ -181,6 +331,8 @@ async function loadDevices() {
     sel.addEventListener('change', () => {
       currentDevice = sel.value;
       localStorage.setItem('tw_device', currentDevice);
+      // 设备切换 → 旧设备的 ETag/引用全作废,必须清,否则会拿旧设备的数据去对比新设备
+      clearDataCache();
       refreshAll();
       if (!sharedBillToken && !isSharedView) loadBills();
       loadBillSources();
@@ -206,32 +358,51 @@ async function loadDevices() {
 
 async function refreshAll() {
   if (!currentDevice) return;
-  await Promise.all([
+  const results = await Promise.all([
     renderMirror(),
     renderRenewalCard(),
     renderRegionCard(),
     renderProtocolChart(),
     renderCharts(currentHours),
   ]);
+  // results: 每个 render 返回 true=已更新 / false=无变化/失败
+  // "无变化"指服务端 304 命中(数据未变)→ render 函数早早 return false,DOM/Chart 不动
+  const changed = results.filter(Boolean).length;
+  // 世界地图用 lastHistoryItems 复用,不计"额外"卡片
   renderWorldMapCard();
-  setFooter('已刷新 · ' + new Date().toLocaleTimeString('zh-CN', { hour12: false }), true);
+  const ts = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  setFooter(
+    changed === 0
+      ? `无变化 · ${ts}`
+      : `已更新 ${changed} 项 · ${ts}`,
+    true
+  );
 }
 
 // ---------- 卡片镜像 ----------
 async function renderMirror() {
   try {
-    const res = await fetch(`/api/latest?device=${currentDevice}&kind=full`);
-    if (res.status === 404) {
-      setMirrorEmpty('该设备暂无 FULL 快照');
-      return;
+    // 用 fetchJSON(ETag + 304 + in-flight dedup)— full 失败抛错,probe 失败视作"无 probe"
+    const [fullEntry, probeEntry] = await Promise.all([
+      fetchJSON(`/api/latest?device=${currentDevice}&kind=full`).catch(e => ({ error: e })),
+      fetchJSON(`/api/latest?device=${currentDevice}&kind=probe`).catch(e => ({ error: e })),
+    ]);
+    if (fullEntry.error) {
+      const msg = fullEntry.error.message.includes('404') ? '该设备暂无 FULL 快照' : '加载失败: ' + fullEntry.error.message;
+      setMirrorEmpty(msg);
+      return false;
     }
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const data = await res.json();
+    const data = fullEntry.data;
+    const probeData = probeEntry.error ? null : probeEntry.data;
+    const probeTs = probeData?.ts;
+    // 引用相同 → 数据未变,跳过整个 DOM 重写(保留选中/焦点/滚动,避免 Chart.js 触发无意义重绘)
+    if (data === lastDataRef.mirrorFull && probeData === lastDataRef.mirrorProbe) {
+      return false;
+    }
+    lastDataRef.mirrorFull = data;
+    lastDataRef.mirrorProbe = probeData;
     const s = data.summary || {};
     const p = data.payload || {};
-    const probeRes = await fetch(`/api/latest?device=${currentDevice}&kind=probe`);
-    const probeData = probeRes.ok ? await probeRes.json() : null;
-    const probeTs = probeData?.ts;
 
     // server name
     document.getElementById('mirror-server').innerHTML =
@@ -319,8 +490,10 @@ async function renderMirror() {
       parts.push(`<span>${escapeHtml(s.subLoadSummary)}</span>`);
     }
     meta.innerHTML = parts.length ? parts.join(' · ') : '<span class="empty">—</span>';
+    return true;
   } catch (e) {
     setMirrorEmpty('加载失败: ' + e.message);
+    return false;
   }
 }
 
@@ -337,19 +510,25 @@ function setMirrorEmpty(msg) {
 // 同一组 regionStats,一个排序状态,左右两段:ring chart + region info + 最快/最慢
 async function renderRegionCard() {
   try {
-    const res = await fetch(`/api/latest?device=${currentDevice}&kind=full`);
-    if (!res.ok) {
-      document.getElementById('region-list').innerHTML = '<span class="empty">— 暂无数据 —</span>';
-      return;
+    let data;
+    try {
+      ({ data } = await fetchJSON(`/api/latest?device=${currentDevice}&kind=full`));
+    } catch (e) {
+      const empty = e.message.includes('404') ? '— 暂无数据 —' : '<span class="empty">加载失败: ' + e.message + '</span>';
+      document.getElementById('region-list').innerHTML = empty;
+      return false;
     }
-    const data = await res.json();
+    if (data === lastDataRef.region) {
+      return false;  // 数据未变 → 跳过整个 region-list innerHTML 重建(保留用户选中的 region row)
+    }
+    lastDataRef.region = data;
     const s = data.summary || {};
     const rs = s.regionStats || {};
     // total=0 的 region 跳过(等于"测了 0 个节点"=没这个地区)
     const entries = Object.entries(rs).filter(([_, v]) => v.total > 0);
     if (entries.length === 0) {
       document.getElementById('region-list').innerHTML = '<span class="empty">— 该设备未上传地区数据 —</span>';
-      return;
+      return false;
     }
     // 状态派生:从 ok/total 推 — regionStats 没有 status 字段,自己算
     const statusOf = (v) => {
@@ -465,20 +644,30 @@ async function renderRegionCard() {
         <div class="rr-fs">${fsBlock}</div>
       </div>`;
     }).join('');
+    return true;
   } catch (e) {
     document.getElementById('region-list').innerHTML = '<span class="empty">加载失败: ' + e.message + '</span>';
+    return false;
   }
 }
 
 // ---------- 协议分布(pie) ----------
 async function renderProtocolChart() {
   try {
-    const res = await fetch(`/api/latest?device=${currentDevice}&kind=full`);
-    if (!res.ok) return;
-    const data = await res.json();
+    let data;
+    try {
+      ({ data } = await fetchJSON(`/api/latest?device=${currentDevice}&kind=full`));
+    } catch (e) {
+      // 协议分布是辅助视图,full 缺失时静默跳过
+      return false;
+    }
+    if (data === lastDataRef.protocol) {
+      return false;  // 协议分布无变化 → 不调用 chartUpdate(避免 Chart.js 重绘 canvas)
+    }
+    lastDataRef.protocol = data;
     const ps = data.summary?.protocolStats || {};
     const entries = Object.entries(ps);
-    if (entries.length === 0) return;
+    if (entries.length === 0) return false;
     const labels = entries.map(([k]) => k);
     const values = entries.map(([_, v]) => v);
     const colors = entries.map(([_, i]) => CHART_PALETTE[i % CHART_PALETTE.length]);
@@ -495,24 +684,32 @@ async function renderProtocolChart() {
         }
       }
     });
+    return true;
   } catch (e) {
     console.error('renderProtocolChart failed:', e);
+    return false;
   }
 }
 
 // ---------- 续费建议榜(PRIMARY) ----------
 async function renderRenewalCard() {
   try {
-    const res = await fetch(`/api/latest?device=${currentDevice}&kind=probe`);
-    if (!res.ok) {
-      document.getElementById('renewal-list').innerHTML = '<span class="empty">— 暂无数据 —</span>';
-      return;
+    let data;
+    try {
+      ({ data } = await fetchJSON(`/api/latest?device=${currentDevice}&kind=probe`));
+    } catch (e) {
+      const empty = e.message.includes('404') ? '— 暂无数据 —' : '<span class="empty">加载失败: ' + e.message + '</span>';
+      document.getElementById('renewal-list').innerHTML = empty;
+      return false;
     }
-    const data = await res.json();
+    if (data === lastDataRef.renewal) {
+      return false;  // 续费榜快照未变 → 跳过整张表的 innerHTML 重建
+    }
+    lastDataRef.renewal = data;
     const scores = data.summary?.subscriptionScores || [];
     if (scores.length === 0) {
       document.getElementById('renewal-list').innerHTML = '<span class="empty">— 该设备未上传续费数据 —</span>';
-      return;
+      return false;
     }
     const renewBadge = { renew: '✓ 续费', consider: '⚠ 考虑', replace: '✗ 换掉' };
     const renewColor = {
@@ -586,8 +783,10 @@ async function renderRenewalCard() {
         </div>
       </div>`;
     }).join('');
+    return true;
   } catch (e) {
     document.getElementById('renewal-list').innerHTML = '<span class="empty">加载失败: ' + e.message + '</span>';
+    return false;
   }
 }
 
@@ -596,9 +795,19 @@ async function renderRenewalCard() {
 async function renderCharts(hours = 24) {
   const bucketMin = HOURS_BUCKET_MIN[hours] || 15;
   try {
-    const res = await fetch(`/api/history?device=${currentDevice}&hours=${hours}`);
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const { items } = await res.json();
+    let items;
+    try {
+      const entry = await fetchJSON(`/api/history?device=${currentDevice}&hours=${hours}`);
+      items = entry.data.items;
+    } catch (e) {
+      console.error('renderCharts fetch failed:', e);
+      return false;
+    }
+    // 引用相同 → 服务端 304 命中,9 张图(8 趋势 + 1 协议)全部跳过 chartUpdate
+    if (items === lastDataRef.history) {
+      return false;
+    }
+    lastDataRef.history = items;
     // 缓存给世界地图复用(7d/30d 视角下 regionStats 不来自 /latest,要从 history 取)
     lastHistoryItems = items;
     lastHistoryHours = hours;
@@ -613,8 +822,10 @@ async function renderCharts(hours = 24) {
     drawTrafficRate(items, bucketMin);
     // 同步"按 N 分钟桶"提示
     updateBucketHint(bucketMin);
+    return true;
   } catch (e) {
     console.error('renderCharts failed:', e);
+    return false;
   }
 }
 
@@ -734,6 +945,10 @@ function drawTraffic(items, bucketMin) {
   });
 }
 
+// "节点延迟"折线图 — p15 / p50 / p95 / p99 四条分位线
+// p15 (灰虚线) = 低分位参考,p50 (蓝) = 典型,p95 (橙) = 慢侧,p99 (红虚线) = 长尾
+// TODO(App 端): 当前 summary.latency 只在 App 端样本里算了 p50/p95,
+//   p15/p99 暂时来自 seed(本地)或为 null(生产),需要 App 端在 sample 计算时一起算进去
 function drawLatency(items, bucketMin) {
   const byTs = new Map();
   items.forEach(it => {
@@ -741,15 +956,19 @@ function drawLatency(items, bucketMin) {
   });
   const series = [...byTs.values()].sort((a, b) => a.ts - b.ts);
   const labels = series.map(it => formatTime(it.ts, currentHours));
+  const p15 = series.map(it => it.summary.latency.p15);
   const p50 = series.map(it => it.summary.latency.p50);
   const p95 = series.map(it => it.summary.latency.p95);
+  const p99 = series.map(it => it.summary.latency.p99);
   chartUpdate('chart-latency', 'latency', {
     type: 'line',
     data: {
       labels,
       datasets: [
+        { label: 'p15', data: p15, borderColor: COLORS.secondary, backgroundColor: 'transparent', tension: 0.25, pointRadius: 2, borderDash: [4, 3] },
         { label: 'p50', data: p50, borderColor: COLORS.primary, backgroundColor: 'transparent', tension: 0.25, pointRadius: 2 },
         { label: 'p95', data: p95, borderColor: COLORS.warn, backgroundColor: 'transparent', tension: 0.25, pointRadius: 2 },
+        { label: 'p99', data: p99, borderColor: COLORS.err, backgroundColor: 'transparent', tension: 0.25, pointRadius: 2, borderDash: [4, 3] },
       ]
     },
     options: chartOpts({ y: { beginAtZero: true, ticks: { callback: v => v + ' ms' } } })
@@ -797,46 +1016,276 @@ function drawRegionLatency(items, bucketMin) {
 }
 
 function drawSubConn(items, bucketMin) {
-  const byTs = new Map();
-  items.forEach(it => {
-    if (it.summary?.subStats) byTs.set(bucketKey(it.ts, bucketMin), it);
+  // 两种视图:
+  //   snapshot — x=订阅源,单柱 OK+失败 堆叠,显示"现在每个订阅源的状态"
+  //   trend    — x=时间,每订阅源一条折线,显示"每个订阅源失败数的变化趋势"
+  //              (OK 比例已由 chart-sub-ok-rate 覆盖,这里只画失败数避免重复)
+  if (subConnView === 'snapshot') {
+    drawSubConnSnapshot(items);
+  } else {
+    drawSubConnTrend(items, bucketMin);
+  }
+}
+
+function drawSubConnSnapshot(items) {
+  const latest = pickLatestItem(items);
+  const subList = getSubList(latest?.summary);
+  const hint = document.querySelector('[data-hint="sub-conn"]');
+  if (!latest || subList.length === 0) {
+    if (hint) hint.textContent = '最新快照 · 暂无订阅源';
+    chartUpdate('chart-sub-conn', 'subConn', {
+      type: 'bar',
+      data: { labels: [], datasets: [] },
+      options: chartOpts({ y: { beginAtZero: true, ticks: { stepSize: 1, precision: 0 } } })
+    });
+    return;
+  }
+  if (hint) hint.textContent = '最新快照 · 每订阅源 OK / 失败';
+  const labels = subList.map(([, flag]) => flag);
+  const okData = subList.map(([url]) => {
+    const st = latest.summary.subLineStats?.[url];
+    return st?.ok ?? 0;
   });
-  const series = [...byTs.values()].sort((a, b) => a.ts - b.ts);
-  const labels = series.map(it => formatTime(it.ts, currentHours));
-  const ok = series.map(it => it.summary.subStats.ok);
-  const timeout = series.map(it => it.summary.subStats.timeout);
-  const failed = series.map(it => it.summary.subStats.failed);
+  const failData = subList.map(([url]) => {
+    const st = latest.summary.subLineStats?.[url];
+    if (!st) return 0;
+    return Math.max(0, (st.total ?? 0) - (st.ok ?? 0));
+  });
   chartUpdate('chart-sub-conn', 'subConn', {
     type: 'bar',
     data: { labels, datasets: [
-      { label: 'OK', data: ok, backgroundColor: COLORS.ok, stack: 's' },
-      { label: '超时', data: timeout, backgroundColor: COLORS.warn, stack: 's' },
-      { label: '失败', data: failed, backgroundColor: COLORS.err, stack: 's' },
+      { label: 'OK', data: okData, backgroundColor: COLORS.ok, stack: 's', borderRadius: 4 },
+      { label: '失败', data: failData, backgroundColor: COLORS.err, stack: 's', borderRadius: 4 },
     ]},
     options: chartOpts({ y: { beginAtZero: true, ticks: { stepSize: 1, precision: 0 } } })
   });
 }
 
+function drawSubConnTrend(items, bucketMin) {
+  const byTs = new Map();
+  items.forEach(it => {
+    if (it.summary?.subLineStats) byTs.set(bucketKey(it.ts, bucketMin), it);
+  });
+  const series = [...byTs.values()].sort((a, b) => a.ts - b.ts);
+  const subList = collectSubsAcrossSeries(series);
+  const hint = document.querySelector('[data-hint="sub-conn"]');
+  if (hint) hint.textContent = '时间趋势 · 每订阅源失败节点数';
+  const labels = series.map(it => formatTime(it.ts, currentHours));
+  const datasets = subList.map(([url, flag], i) => {
+    const data = series.map(it => {
+      const st = it.summary.subLineStats?.[url];
+      if (!st) return null;
+      return Math.max(0, (st.total ?? 0) - (st.ok ?? 0));
+    });
+    return {
+      label: flag, data,
+      borderColor: CHART_PALETTE[i % CHART_PALETTE.length],
+      backgroundColor: CHART_PALETTE[i % CHART_PALETTE.length] + '22', // 12% alpha for fill
+      tension: 0.25, spanGaps: true,
+      pointRadius: 2, pointHoverRadius: 4,
+      fill: false,
+    };
+  });
+  chartUpdate('chart-sub-conn', 'subConn', {
+    type: 'line', data: { labels, datasets },
+    options: chartOpts({ y: { beginAtZero: true, ticks: { stepSize: 1, precision: 0 } } })
+  });
+}
+
 function drawFailCount(items, bucketMin) {
+  // 两种视图:
+  //   snapshot — x=订阅源,每根柱按地区堆叠,显示"每个订阅源失败节点的地区分布"
+  //   trend    — x=时间,每地区一条折线,显示"各地区失败节点数随时间的变化"
+  if (failCountView === 'snapshot') {
+    drawFailCountSnapshot(items);
+  } else {
+    drawFailCountTrend(items, bucketMin);
+  }
+}
+
+function drawFailCountSnapshot(items) {
+  const latest = pickLatestItem(items);
+  const subList = getSubList(latest?.summary);
+  const hint = document.querySelector('[data-hint="fail-count"]');
+  if (!latest || subList.length === 0) {
+    if (hint) hint.textContent = '最新快照 · 暂无订阅源';
+    chartUpdate('chart-fail-count', 'failCount', {
+      type: 'bar',
+      data: { labels: [], datasets: [] },
+      options: chartOpts({ y: { beginAtZero: true, ticks: { stepSize: 1, precision: 0 } } })
+    });
+    return;
+  }
+  const regionFails = buildSubRegionFailures(latest.summary, subList);
+  // 选所有出现过的地区(按总失败数降序,稳定排序)
+  const regionSet = new Set();
+  regionFails.forEach(by => Object.keys(by).forEach(r => regionSet.add(r)));
+  const regionTotals = {};
+  regionFails.forEach(by => Object.entries(by).forEach(([r, n]) => { regionTotals[r] = (regionTotals[r] || 0) + n; }));
+  const regions = [...regionSet].sort((a, b) => (regionTotals[b] || 0) - (regionTotals[a] || 0));
+  // 是否使用了精确字段 vs 估算
+  const hasExact = !!latest.summary.subRegionFailStats;
+  if (hint) hint.textContent = hasExact
+    ? '最新快照 · 失败按地区(精确)'
+    : '最新快照 · 失败按地区(估算)';
+  const labels = subList.map(([, flag]) => flag);
+  const datasets = regions.map((region, i) => {
+    const data = subList.map(([url]) => regionFails.get(url)?.[region] || 0);
+    return {
+      label: region, data,
+      backgroundColor: CHART_PALETTE[i % CHART_PALETTE.length],
+      stack: 's', borderRadius: 4,
+    };
+  });
+  chartUpdate('chart-fail-count', 'failCount', {
+    type: 'bar',
+    data: { labels, datasets },
+    options: chartOpts({ y: { beginAtZero: true, ticks: { stepSize: 1, precision: 0 } } })
+  });
+}
+
+function drawFailCountTrend(items, bucketMin) {
   const byTs = new Map();
   items.forEach(it => {
     const key = bucketKey(it.ts, bucketMin);
     if (it.kind === 'probe' || !byTs.has(key)) byTs.set(key, it);
   });
   const series = [...byTs.values()].sort((a, b) => a.ts - b.ts);
+  const hint = document.querySelector('[data-hint="fail-count"]');
+  // 每个时间点按 region 拆分:按 regionStats.total 比例估算
+  // (精确的 subRegionFailStats 是 per-snapshot 数据,这里 trend 不复用以保持简单稳定)
+  // 失败数用 subLineStats 各 sub 的 (total-ok) 求和(比 lineOkCount/lineTotalCount 更细粒度)
+  const regionSet = new Set();
+  series.forEach(it => Object.keys(it.summary?.regionStats || {}).forEach(r => regionSet.add(r)));
+  const regions = [...regionSet].sort();
+  if (hint) hint.textContent = '时间趋势 · 各地区失败节点数(估算)';
   const labels = series.map(it => formatTime(it.ts, currentHours));
-  const failed = series.map(it => {
-    const s = it.summary || {};
-    if (typeof s.lineTotalCount === 'number' && typeof s.lineOkCount === 'number') {
-      return Math.max(0, s.lineTotalCount - s.lineOkCount);
-    }
-    return null;
+  const datasets = regions.map((region, i) => {
+    const data = series.map(it => {
+      const s = it.summary || {};
+      // 1) 先算每个时间点全网失败数(优先 subLineStats 求和,没有再退化到 lineOk/lineTotal)
+      let totalFail = null;
+      if (s.subLineStats && typeof s.subLineStats === 'object') {
+        const sum = Object.values(s.subLineStats).reduce((acc, st) => {
+          const tot = st?.total || 0;
+          const ok = st?.ok || 0;
+          return acc + Math.max(0, tot - ok);
+        }, 0);
+        if (sum > 0) totalFail = sum;
+      }
+      if (totalFail == null && typeof s.lineTotalCount === 'number' && typeof s.lineOkCount === 'number') {
+        totalFail = Math.max(0, s.lineTotalCount - s.lineOkCount);
+      }
+      if (totalFail == null) return null;
+      // 2) 按 regionStats 比例分摊
+      const regionStats = s.regionStats || {};
+      const regionTotal = regionStats[region]?.total || 0;
+      const sumTotal = Object.values(regionStats).reduce((a, r) => a + (r?.total || 0), 0);
+      if (sumTotal <= 0) return null;
+      return Math.round(totalFail * regionTotal / sumTotal);
+    });
+    return {
+      label: region, data,
+      borderColor: CHART_PALETTE[i % CHART_PALETTE.length],
+      backgroundColor: 'transparent',
+      tension: 0.25, spanGaps: true,
+      pointRadius: 2, pointHoverRadius: 4,
+    };
   });
   chartUpdate('chart-fail-count', 'failCount', {
-    type: 'bar',
-    data: { labels, datasets: [{ label: '失败节点数', data: failed, backgroundColor: COLORS.err, borderRadius: 4 }] },
+    type: 'line', data: { labels, datasets },
     options: chartOpts({ y: { beginAtZero: true, ticks: { stepSize: 1, precision: 0 } } })
   });
+}
+
+// ---------- 共享工具:per-sub / per-region 数据抽取 ----------
+// 取最新一条(优先 full)
+function pickLatestItem(items) {
+  if (!items || items.length === 0) return null;
+  // 优先 full,然后按 ts 倒序取最大
+  const sorted = [...items].sort((a, b) => {
+    if ((a.kind === 'full') !== (b.kind === 'full')) return a.kind === 'full' ? -1 : 1;
+    return b.ts - a.ts;
+  });
+  return sorted[0];
+}
+
+// 从 summary.subLineStats 抽出 [[url, flag]] 列表,按 flag 字典序稳定排序
+function getSubList(summary) {
+  if (!summary || !summary.subLineStats) return [];
+  return Object.entries(summary.subLineStats)
+    .map(([url, st]) => [url, (st.flag || url).slice(0, 6)])
+    .sort((a, b) => a[1].localeCompare(b[1]));
+}
+
+// 在一段时间序列里收集所有出现过的订阅源(按 flag 字典序)
+function collectSubsAcrossSeries(series) {
+  const map = new Map();
+  series.forEach(it => {
+    const s = it.summary || {};
+    if (s.subLineStats) {
+      Object.entries(s.subLineStats).forEach(([url, st]) => {
+        if (!map.has(url)) map.set(url, (st.flag || url).slice(0, 6));
+      });
+    }
+  });
+  return [...map.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+}
+
+// 给定 summary + subList,产出 Map<url, Map<region, failedCount>>
+// 优先用 summary.subRegionFailStats[url][region] = failedCount(精确)
+// 缺失时按 subLineStats 算出每个 sub 的失败数,再按 regionStats.total 比例分摊
+function buildSubRegionFailures(summary, subList) {
+  const out = new Map();
+  if (!summary) return out;
+  subList.forEach(([url]) => out.set(url, {}));
+
+  // 1) 优先:精确字段
+  if (summary.subRegionFailStats && typeof summary.subRegionFailStats === 'object') {
+    subList.forEach(([url]) => {
+      const byRegion = summary.subRegionFailStats[url];
+      if (byRegion && typeof byRegion === 'object') {
+        Object.entries(byRegion).forEach(([r, n]) => {
+          if (typeof n === 'number' && n > 0) {
+            out.get(url)[r] = (out.get(url)[r] || 0) + n;
+          }
+        });
+      }
+    });
+    return out;
+  }
+
+  // 2) 退化:按 subLineStats[url] 算失败数,再按 regionStats.total 比例分摊
+  const regionStats = summary.regionStats || {};
+  const regions = Object.keys(regionStats);
+  const sumRegionTotal = regions.reduce((a, r) => a + (regionStats[r]?.total || 0), 0);
+  subList.forEach(([url]) => {
+    const st = summary.subLineStats?.[url];
+    if (!st) return;
+    const failed = Math.max(0, (st.total ?? 0) - (st.ok ?? 0));
+    if (failed === 0) return;
+    if (sumRegionTotal <= 0 || regions.length === 0) {
+      // 没有 region 数据,挂到"未知"桶
+      out.get(url)['未知'] = (out.get(url)['未知'] || 0) + failed;
+      return;
+    }
+    // 比例分摊 + 整数化 + 余数修正(最后那个 region 吃 diff 保持 sum 一致)
+    const allocations = regions.map(r => ({
+      r,
+      exact: failed * (regionStats[r]?.total || 0) / sumRegionTotal,
+    }));
+    const rounded = allocations.map(a => Math.floor(a.exact));
+    const remainder = failed - rounded.reduce((a, n) => a + n, 0);
+    if (remainder > 0 && rounded.length > 0) {
+      // 把余数加到比例最大的那个,保证整数求和 = failed
+      const topIdx = allocations.reduce((best, a, i) => a.exact - allocations[best].exact > 0 ? i : best, 0);
+      rounded[topIdx] += remainder;
+    }
+    allocations.forEach((a, i) => {
+      if (rounded[i] > 0) out.get(url)[a.r] = rounded[i];
+    });
+  });
+  return out;
 }
 
 function drawTrafficRate(items, bucketMin) {

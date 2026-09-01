@@ -498,6 +498,19 @@ body.is-share-mode .brand h1 { font-size: 16px; }
   font-weight: 700;
   letter-spacing: 0.2px;
 }
+.brand-version {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--meta);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.2px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  cursor: help;
+  line-height: 1.4;
+}
 .brand-dot {
   width: 10px;
   height: 10px;
@@ -622,6 +635,41 @@ body.is-share-mode .brand h1 { font-size: 16px; }
 .chart-hint {
   font-size: 11px;
   color: var(--secondary);
+}
+.chart-head-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+/* 双选分段控件:最新快照 / 时间趋势 */
+.seg-toggle {
+  display: inline-flex;
+  background: var(--surface-2, #F4F5F7);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px;
+  font-size: 11px;
+  line-height: 1;
+}
+.seg-toggle button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--secondary);
+  padding: 4px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 500;
+  transition: background 0.15s, color 0.15s;
+}
+.seg-toggle button:hover { color: var(--text); }
+.seg-toggle button[aria-selected="true"] {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.06);
 }
 .chart-wrap {
   position: relative;

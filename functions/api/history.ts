@@ -116,13 +116,20 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     summary: safeParse(r.summary_json),
   }));
 
-  return json({
+  // ETag 用 device + hours + maxTs — 新快照来时 maxTs 必变,客户端命中 304 直接复用旧 items
+  const maxTs = items.length > 0 ? items[items.length - 1].ts : 0;
+  const etag = `W/"${device}-${hours}-${maxTs}-${items.length}"`;
+  if (context.request.headers.get('If-None-Match') === etag) {
+    return new Response(null, { status: 304, headers: { etag } });
+  }
+
+  return jsonWithEtag({
     device,
     hours,
     kind: kindFilter || 'all',
     bucket: bucketLabel,
     items,
-  });
+  }, etag);
 };
 
 function safeParse(s: string): unknown {
@@ -137,5 +144,16 @@ function json(obj: unknown, status = 200): Response {
   return new Response(JSON.stringify(obj), {
     status,
     headers: { 'content-type': 'application/json; charset=utf-8' },
+  });
+}
+
+function jsonWithEtag(obj: unknown, etag: string, status = 200): Response {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      etag,
+      'cache-control': 'private, max-age=0, must-revalidate',
+    },
   });
 }

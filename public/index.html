@@ -160,7 +160,9 @@
     .world-map-card { position: relative; }
     .world-map-card .map-wrap {
       position: relative;
-      min-height: 400px;
+      /* 不设 min-height,让 SVG 用 viewBox 960:600 = 1.6:1 比例自然撑开卡片高度。
+         CSS columns 瀑布流下,4/6 列时卡片宽度可能只有 ~554/~482px,原 400px
+         min-height 会强制把卡片拉高,地图下面留白;现在按宽度自然缩放 */
     }
     .world-map-card svg {
       width: 100%;
@@ -228,6 +230,7 @@
       <div class="brand">
         <div class="brand-dot"></div>
         <h1>TunnelWatch</h1>
+        <span class="brand-version" id="brand-version" title="发版时间 — 刷新页面看是否更新,即可确认 deploy 是否生效"></span>
       </div>
       <div class="view-switcher" id="view-switcher" role="tablist" aria-label="时间窗口">
         <button type="button" data-hours="24"  class="active" role="tab" aria-selected="true">24h</button>
@@ -358,25 +361,10 @@
         <div id="renewal-list">— 暂无数据 —</div>
       </section>
 
-      <!-- PRIMARY: 按地区 — 节点数排序 + ring chart + OK 率 + p50 + 最快/最慢 -->
-      <section class="region-card chart-card" id="region-card">
-        <div class="chart-card-head">
-          <h2>按地区</h2>
-          <div class="head-right">
-            <span class="chart-hint" id="region-hint">当前快照 · OK 率 + p50 + 最快 ⚡ / 最慢 🐌</span>
-            <div class="view-switcher" id="region-sort-switcher" role="tablist" aria-label="地区排序">
-              <button type="button" data-sort="count" class="active" role="tab" aria-selected="true">充裕在前</button>
-              <button type="button" data-sort="latency" role="tab" aria-selected="false">⚡ 延迟快</button>
-            </div>
-          </div>
-        </div>
-        <div class="region-list" id="region-list">— 暂无数据 —</div>
-      </section>
-
-      <!-- 世界地图 — 按地区 regionStats 按 p50 染色(24h 用 latest,7d/30d 用 history) -->
+      <!-- 地区分布 — 按地区 regionStats 按 p50 染色(24h 用 latest,7d/30d 用 history) -->
       <section class="world-map-card chart-card" id="world-map-card">
         <div class="chart-card-head">
-          <h2>世界地图</h2>
+          <h2>地区分布</h2>
           <span class="chart-hint" id="world-map-hint">24h · 按地区 p50 染色</span>
         </div>
         <div class="map-wrap">
@@ -390,6 +378,21 @@
           <span><span class="swatch" style="background:#9CA3AF"></span>不可用</span>
           <span><span class="swatch" style="background:#E5E7EB;border:1px solid #CBD5E1"></span>无数据</span>
         </div>
+      </section>
+
+      <!-- 按地区 — 节点数排序 + ring chart + OK 率 + p50 + 最快/最慢 -->
+      <section class="region-card chart-card" id="region-card">
+        <div class="chart-card-head">
+          <h2>按地区</h2>
+          <div class="head-right">
+            <span class="chart-hint" id="region-hint">当前快照 · OK 率 + p50 + 最快 ⚡ / 最慢 🐌</span>
+            <div class="view-switcher" id="region-sort-switcher" role="tablist" aria-label="地区排序">
+              <button type="button" data-sort="count" class="active" role="tab" aria-selected="true">充裕在前</button>
+              <button type="button" data-sort="latency" role="tab" aria-selected="false">⚡ 延迟快</button>
+            </div>
+          </div>
+        </div>
+        <div class="region-list" id="region-list">— 暂无数据 —</div>
       </section>
 
       <!-- 协议分布(pie) -->
@@ -413,7 +416,7 @@
       <section class="chart-card">
         <div class="chart-card-head">
           <h2 data-hours-title="{H} 节点延迟">{H} 节点延迟</h2>
-          <span class="chart-hint">全量 p50 / p95 (ms)</span>
+          <span class="chart-hint">全量延迟分位 p15 / p50 / p95 / p99 (ms)</span>
         </div>
         <div class="chart-wrap"><canvas id="chart-latency"></canvas></div>
       </section>
@@ -436,16 +439,14 @@
 
       <section class="chart-card">
         <div class="chart-card-head">
-          <h2 data-hours-title="{H} 流量变化">{H} 流量变化</h2>
-          <span class="chart-hint">已用 / 总量 (GB)</span>
-        </div>
-        <div class="chart-wrap"><canvas id="chart-traffic"></canvas></div>
-      </section>
-
-      <section class="chart-card">
-        <div class="chart-card-head">
           <h2 data-hours-title="{H} 订阅源连通性">{H} 订阅源连通性</h2>
-          <span class="chart-hint">OK / 超时 / 失败</span>
+          <div class="chart-head-right">
+            <span class="chart-hint" data-hint="sub-conn"></span>
+            <div class="seg-toggle" role="tablist" data-toggle="sub-conn" aria-label="订阅源连通性视图切换">
+              <button type="button" role="tab" data-view="snapshot" aria-selected="true">最新快照</button>
+              <button type="button" role="tab" data-view="trend" aria-selected="false">时间趋势</button>
+            </div>
+          </div>
         </div>
         <div class="chart-wrap"><canvas id="chart-sub-conn"></canvas></div>
       </section>
@@ -453,7 +454,13 @@
       <section class="chart-card">
         <div class="chart-card-head">
           <h2 data-hours-title="{H} 失败节点数">{H} 失败节点数</h2>
-          <span class="chart-hint" data-bucket-hint>按 {B} 桶</span>
+          <div class="chart-head-right">
+            <span class="chart-hint" data-hint="fail-count"></span>
+            <div class="seg-toggle" role="tablist" data-toggle="fail-count" aria-label="失败节点数视图切换">
+              <button type="button" role="tab" data-view="snapshot" aria-selected="true">最新快照</button>
+              <button type="button" role="tab" data-view="trend" aria-selected="false">时间趋势</button>
+            </div>
+          </div>
         </div>
         <div class="chart-wrap"><canvas id="chart-fail-count"></canvas></div>
       </section>
@@ -464,6 +471,14 @@
           <span class="chart-hint" data-bucket-hint>每 {B} 增量 (GB)</span>
         </div>
         <div class="chart-wrap"><canvas id="chart-traffic-rate"></canvas></div>
+      </section>
+
+      <section class="chart-card">
+        <div class="chart-card-head">
+          <h2 data-hours-title="{H} 流量变化">{H} 流量变化</h2>
+          <span class="chart-hint">已用 / 总量 (GB)</span>
+        </div>
+        <div class="chart-wrap"><canvas id="chart-traffic"></canvas></div>
       </section>
 
       </div>

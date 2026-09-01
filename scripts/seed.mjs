@@ -41,6 +41,25 @@ const subs = [
   { flag: 'stl-B',  url: 'https://sub2.stl.example/y',        lines: 2 },
 ];
 
+// 给每个 sub 的每条 line 分配一个 region(顺序固定 → 失败顺序也确定 → 数据可对照)
+// 下面这一段是 subRegionFailStats / regionStats 的"真实数据源";
+// 没有 region 信息的子集会自动用估算回退(app.js buildSubRegionFailures)
+const subLineRegions = {
+  'https://sub1.momo.example/api/v1': ['HK', 'HK', 'JP', 'JP', 'US', 'US', 'SG'],
+  'https://sub2.momo.example/api/v1': ['JP', 'JP', 'HK', 'HK', 'US', 'US', 'SG'],
+  'https://sub1.big.example/link':    ['US', 'US', 'HK', 'JP', 'SG'],
+  'https://sub2.big.example/link':    ['HK', 'JP', 'US', 'SG'],
+  'https://sub.stl.example/x':        ['JP', 'US', 'US'],
+  'https://sub2.stl.example/y':       ['HK', 'SG'],
+};
+// region 汇总(每个 region 的总节点数)— 与 subLineRegions 各 sub 长度求和一致
+//   HK: momo-A×2 + momo-B×2 + big-A×1 + big-B×1 + stl-B×1 = 7
+//   JP: momo-A×2 + momo-B×2 + big-A×1 + big-B×1 + stl-A×1 = 7
+//   US: momo-A×2 + momo-B×2 + big-A×2 + big-B×1 + stl-A×2 = 9
+//   SG: momo-A×1 + momo-B×1 + big-A×1 + big-B×1 + stl-B×1 = 5
+//   合计 7+7+9+5 = 28
+const REGION_TOTALS = { HK: 7, JP: 7, US: 9, SG: 5 };
+
 // 简单 LCG 给确定性(每次跑数据一样,方便对照)
 let seed = 42;
 const rand = () => {
@@ -52,19 +71,11 @@ for (let i = 0; i < 49; i++) {
   const hoursAgo = 24 - i * 0.5;
   const tsExpr = `(unixepoch() - ${Math.floor(hoursAgo * 3600)}) * 1000`;
 
-  const momoDip = (i === 30 || i === 32) ? 8 : 14;
-  const bigDip = (i === 18) ? 6 : 9;
-  const stlDip = (i === 38) ? 3 : 5;
-  const lineOk = momoDip + bigDip + stlDip;
-  const uidStats = {
-    momo: { ok: momoDip, total: uidTotal.momo },
-    big: { ok: bigDip, total: uidTotal.big },
-    stl: { ok: stlDip, total: uidTotal.stl },
-  };
-
   // per-sub OK 分布(更细致,给 per-sub 图表用)
   // 默认所有 sub 全 OK,有特定 i 时让特定 sub 掉线
   const subLineStats = {};
+  const subRegionFailStats = {};   // 给"订阅源连通性"快照图用的真实字段
+  const uidFailAccum = { momo: 0, big: 0, stl: 0 };  // 按 uid 累加失败数,后面汇总成 lineOk
   subs.forEach((sub, idx) => {
     let okCount = sub.lines;
     // 模拟各 sub 偶发掉线
@@ -75,6 +86,41 @@ for (let i = 0; i < 49; i++) {
     if (idx === 4 && i === 38) okCount = Math.max(0, sub.lines - 2);
     if (idx === 5 && i === 12) okCount = Math.max(0, sub.lines - 1);
     subLineStats[sub.url] = { ok: okCount, total: sub.lines, flag: sub.flag };
+
+    // 把"失败的 line"按 region 归类(取前 failedCount 行,顺序由 subLineRegions 决定)
+    const failCount = sub.lines - okCount;
+    const regions = subLineRegions[sub.url] || [];
+    const byRegion = {};
+    for (let k = 0; k < failCount && k < regions.length; k++) {
+      const r = regions[k];
+      byRegion[r] = (byRegion[r] || 0) + 1;
+    }
+    if (Object.keys(byRegion).length > 0) subRegionFailStats[sub.url] = byRegion;
+    // 按 uid 累加(用于后面 lineOk/uidStats)— 用 sub 的 flag 前缀区分 uid
+    const uidTag = sub.flag.split('-')[0];
+    if (uidFailAccum[uidTag] != null) uidFailAccum[uidTag] += failCount;
+  });
+
+  // 由 subLineStats 求和得到 lineOk/uidStats(保持一致,避免出现 6 vs 11 这种自相矛盾)
+  const uidStats = {};
+  for (const [uid, total] of Object.entries(uidTotal)) {
+    const ok = Math.max(0, total - (uidFailAccum[uid] || 0));
+    uidStats[uid] = { ok, total };
+  }
+  const lineOk = Object.values(uidStats).reduce((a, s) => a + s.ok, 0);
+
+  // regionStats:按 region 的 p15/p50/p95/p99(取一个稳定基线 + 抖动,便于看趋势)
+  // p50 各 region 略有差异:JP 稍快,US 慢一些
+  const regionBaseP50 = { HK: 95, JP: 85, US: 165, SG: 120 };
+  const regionStats = {};
+  Object.entries(REGION_TOTALS).forEach(([r, total]) => {
+    const base = regionBaseP50[r] || 120;
+    const jitter = rand() * 20 - 10;
+    const rP50 = Math.max(20, Math.round(base + jitter));
+    const rP15 = Math.round(rP50 * 0.55 + rand() * 6);
+    const rP95 = Math.round(rP50 * 1.8 + rand() * 30);
+    const rP99 = Math.round(rP95 * 1.45 + rand() * 40);
+    regionStats[r] = { total, p15: rP15, p50: rP50, p95: rP95, p99: rP99 };
   });
 
   const quotaUsed = +(140 + i * 0.25).toFixed(1);
@@ -83,8 +129,14 @@ for (let i = 0; i < 49; i++) {
 
   const baseP50 = 100 + Math.sin(i / 6) * 30 + rand() * 20;
   const baseP95 = baseP50 * 1.8 + rand() * 40;
+  // p15 < p50(同分布下),p99 > p95(长尾)
+  // 真实分位 = 在样本里排序取对应位置,这里按经验比例近似
+  const baseP15 = baseP50 * 0.55 + rand() * 8;
+  const baseP99 = baseP95 * 1.45 + rand() * 60;
+  const p15 = Math.round(baseP15);
   const p50 = Math.round(baseP50);
   const p95 = Math.round(baseP95);
+  const p99 = Math.round(baseP99);
 
   let ok = totalSubs, timeout = 0, failed = 0;
   if (i === 12) { failed = 2; ok = 4; }
@@ -109,7 +161,9 @@ for (let i = 0; i < 49; i++) {
     uidTags: uids,
     uidStats: uidStats,
     subLineStats: subLineStats,
-    latency: { p50: p50, p95: p95, count: totalLines },
+    subRegionFailStats: subRegionFailStats,
+    regionStats: regionStats,
+    latency: { p15: p15, p50: p50, p95: p95, p99: p99, count: totalLines },
     subStats: { ok: ok, timeout: timeout, failed: failed },
   };
 

@@ -47,7 +47,14 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     return json({ error: 'not found' }, 404);
   }
 
-  return json({
+  // ETag 用 row.id(自增,新行必然 id 不同)— 命中 304 直接省去 JSON parse + 渲染
+  // 强 ETag 即可:id 变了 = 新行,内容必然变;客户端无需验证载荷
+  const etag = `W/"${row.id}"`;
+  if (context.request.headers.get('If-None-Match') === etag) {
+    return new Response(null, { status: 304, headers: { etag } });
+  }
+
+  return jsonWithEtag({
     id: row.id,
     device: row.device_uuid,
     deviceName: row.device_name,
@@ -55,7 +62,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     ts: row.ts,
     summary: safeParse(row.summary_json),
     payload: safeParse(row.payload_json),
-  });
+  }, etag);
 };
 
 function safeParse(s: string): unknown {
@@ -70,5 +77,16 @@ function json(obj: unknown, status = 200): Response {
   return new Response(JSON.stringify(obj), {
     status,
     headers: { 'content-type': 'application/json; charset=utf-8' },
+  });
+}
+
+function jsonWithEtag(obj: unknown, etag: string, status = 200): Response {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      etag,
+      'cache-control': 'private, max-age=0, must-revalidate',
+    },
   });
 }

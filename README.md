@@ -116,6 +116,18 @@ Body:
 }
 ```
 
+`summary` 关键字段(展示端"订阅源连通性 / 失败节点数"两张图主要依赖这些):
+
+| 字段 | 用途 | 必需 |
+|---|---|---|
+| `subLineStats: { [url]: { ok, total, flag } }` | 每个订阅源的成功/总数,用于快照柱状图 | 是 |
+| `subStats: { ok, timeout, failed }` | 跨订阅源聚合(全网成功/超时/失败数) | 是 |
+| `lineOkCount`, `lineTotalCount` | 全网成功行数 / 总行数,用于"按时间"趋势兜底 | 是 |
+| `regionStats: { [region]: { total, p15, p50, p95, p99 } }` | 按地区节点数 + 延迟分布;用于世界地图和地区折线 | 是 |
+| `subRegionFailStats: { [url]: { [region]: failedCount } }` | **可选**:每个订阅源失败节点的地区分布,精确版"失败按地区"柱状图 | 否(缺失时回退到按 `regionStats.total` 比例估算) |
+
+`subRegionFailStats` 是"订阅源连通性 / 失败节点数"快照视图想要"失败节点按地区分色"时的**精确字段**;App 端可在生成 summary 时按"每条失败 line 的 region 归类"构造。若不传,前端会按 `subLineStats[url].total - ok` 算出该订阅源失败数,再按 `regionStats[region].total` 比例分摊(整数化 + 余数修正,保证和等于总失败数)。
+
 Response: `{ ok: true, id: <rowId>, dedupDeleted: <count> }`
 
 ### GET /api/devices
