@@ -1,0 +1,359 @@
+/* TunnelWatch 状态面板 — 极浅色 + 1dp 描边,跟 Android widget 风格一致 */
+:root {
+  --bg: #F7F8FA;
+  --surface: #FFFFFF;
+  --border: #E5E7EB;
+  --text: #1A1F2E;
+  --secondary: #888888;
+  --meta: #666666;
+  --ok: #22C55E;
+  --warn: #F59E0B;
+  --err: #EF4444;
+  --primary: #0F4C81;
+  --primary-soft: #E8F0F8;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+.page {
+  width: 100%;
+  margin: 0 auto;
+  padding: 20px 20px 80px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* ---------- Masonry (真瀑布流 CSS columns) ----------
+   CSS columns 才是真瀑布流 —— 不同高度的卡片在 column 内按内容自然累加,
+   column 不会"拉平"该行卡片高度,底部永远不留空白(短列到顶,长列自然更长)。
+
+   配合 column-count 显式断点:
+   - 1100-1699 → 2 列(每列 ~673,卡片 6/列,正好填满)
+   - 1700-2299 → 3 列(每列 ~644,卡片 4/列,正好填满)
+   - 2300-2999 → 4 列(每列 ~554,卡片 3/列,正好填满)
+   - 3000+     → 6 列(每列 ~482,卡片 2/列,正好填满 2 行) — 12 张卡可整除
+
+   column-width: 420px 作为最小列宽上限,column-count 作为最大列数,
+   浏览器自动取 min(column-count, floor((容器宽-间隙)/column-width))。
+   卡片宽度 = (容器宽 - (n-1)*gap) / n,落在 482~673 之间(自然 ≤720,≥420)。
+
+   column-fill: balance(默认) — 浏览器会让各列高度尽量接近,避免某列过长/过短;
+   容器无固定高度,所以无底部空白问题。
+*/
+.masonry {
+  column-count: 1;
+  column-width: 420px;
+  column-gap: 14px;
+  column-fill: balance;
+}
+@media (min-width: 1100px) { .masonry { column-count: 2; } }
+@media (min-width: 1700px) { .masonry { column-count: 3; } }
+@media (min-width: 2300px) { .masonry { column-count: 4; } }
+@media (min-width: 3000px) { .masonry { column-count: 6; } }
+
+/* 关键:阻止卡片在 column 内被切断 */
+.masonry > section {
+  break-inside: avoid;
+  page-break-inside: avoid;
+  -webkit-column-break-inside: avoid;
+  display: block;            /* column 子元素需要 block 才能正确 flow */
+  width: 100%;
+  margin: 0 0 14px;          /* 列内卡片之间的垂直间距(配合 column-gap 做列间距) */
+  min-width: 0;              /* 防止 canvas 等子元素溢出 */
+}
+
+/* ---------- Topbar ---------- */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.brand h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+.brand-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--primary);
+  box-shadow: 0 0 0 4px var(--primary-soft);
+}
+.device-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+.device-picker label {
+  font-size: 11px;
+  color: var(--secondary);
+  letter-spacing: 0.3px;
+}
+.device-picker select {
+  border: none;
+  background: transparent;
+  font-size: 13px;
+  color: var(--text);
+  outline: none;
+  min-width: 140px;
+  font-weight: 500;
+}
+
+/* ---------- Widget mirror ---------- */
+.widget-mirror {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.widget-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.widget-server {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.widget-update {
+  font-size: 10px;
+  color: var(--secondary);
+  white-space: nowrap;
+}
+.widget-row {
+  font-size: 12px;
+  color: var(--text);
+  line-height: 1.5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.uid-row, .sub-row {
+  white-space: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.uid-row::-webkit-scrollbar, .sub-row::-webkit-scrollbar { display: none; }
+.uid-chip, .sub-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 12px;
+  white-space: nowrap;
+}
+.uid-chip .sq {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 1px;
+}
+.widget-meta {
+  font-size: 11px;
+  color: var(--meta);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+  margin-top: 2px;
+}
+.widget-meta .dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+/* ---------- Chart cards ---------- */
+.chart-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px 16px;
+}
+.chart-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.chart-card h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.chart-hint {
+  font-size: 11px;
+  color: var(--secondary);
+}
+.chart-wrap {
+  position: relative;
+  width: 100%;
+  height: 240px;
+}
+
+/* ---------- Region card list ---------- */
+.region-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.region-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.region-row:last-child { border-bottom: none; }
+.region-row .region-name {
+  flex: 0 0 64px;
+  font-weight: 600;
+  color: var(--text);
+}
+.region-row .region-bar {
+  flex: 1;
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+  position: relative;
+}
+.region-row .region-bar .fill {
+  position: absolute;
+  top: 0; left: 0; bottom: 0;
+  background: var(--ok);
+  transition: width 0.3s;
+}
+.region-row .region-bar .fill.warn { background: var(--warn); }
+.region-row .region-bar .fill.err  { background: var(--err); }
+.region-row .region-count {
+  flex: 0 0 64px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--secondary);
+  font-size: 11px;
+}
+.region-row .region-lat {
+  flex: 0 0 64px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* ---------- Slowest nodes list ---------- */
+.slowest-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.slowest-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.slowest-row:last-child { border-bottom: none; }
+.slowest-row .rank {
+  flex: 0 0 22px;
+  text-align: center;
+  font-weight: 700;
+  color: var(--meta);
+  font-size: 11px;
+}
+.slowest-row .name {
+  flex: 1;
+  color: var(--text);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.slowest-row .region {
+  flex: 0 0 56px;
+  color: var(--meta);
+  font-size: 11px;
+}
+.slowest-row .lat {
+  flex: 0 0 64px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--warn);
+}
+
+/* ---------- Footer ---------- */
+.page-footer {
+  margin-top: 8px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--secondary);
+}
+.page-footer .pulse {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  margin-right: 6px;
+  vertical-align: middle;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* ---------- Status dot in mirror ---------- */
+.mirror-status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+/* ---------- Empty / loading ---------- */
+.empty {
+  color: var(--secondary);
+  font-style: italic;
+  font-size: 12px;
+}

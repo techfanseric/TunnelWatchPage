@@ -1,0 +1,14 @@
+name = "tunnelwatch"
+pages_build_output_dir = "public"
+compatibility_date = "2024-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# D1 数据库绑定
+# - 本地 dev:wrangler 自动用 .wrangler/state/v3/d1/ 下的本地 SQLite
+#   (database_id 在本地 dev 时也用作 hash key,必须是 UUID 格式才能和
+#   wrangler d1 execute --local 共享同一个本地文件)
+# - 部署到 page.dev 前:先 `wrangler d1 create tunnelwatch`,把输出的 id 填到下面
+[[d1_databases]]
+binding = "DB"
+database_name = "tunnelwatch"
+database_id = "11111111-1111-4111-8111-111111111111"

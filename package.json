@@ -1,0 +1,17 @@
+{
+  "name": "tunnelwatch-page",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TunnelWatch telemetry viewer — Cloudflare Pages + D1",
+  "scripts": {
+    "dev": "wrangler pages dev public --port 8788 --ip 127.0.0.1",
+    "db:init": "wrangler d1 execute tunnelwatch --local --file=migrations/0001_init.sql",
+    "db:seed": "node scripts/seed.mjs",
+    "db:query": "wrangler d1 execute tunnelwatch --local --command",
+    "db:reset": "rm -rf .wrangler/state && npm run db:init && npm run db:seed"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240919.0",
+    "wrangler": "^3.78.0"
+  }
+}

@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>TunnelWatch · 状态面板</title>
+  <link rel="stylesheet" href="/style.css">
+  <style>
+    /* view-switcher(只在本页内生效,不改 style.css 避免冲撞其他 subagent) */
+    .view-switcher {
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      padding: 3px;
+      background: var(--surface-2, #F4F6FA);
+      border: 1px solid var(--border, #E5E7EB);
+      border-radius: 10px;
+    }
+    .view-switcher button {
+      appearance: none;
+      border: 0;
+      background: transparent;
+      color: var(--secondary, #6B7280);
+      font: inherit;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 5px 12px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+      letter-spacing: 0.02em;
+    }
+    .view-switcher button:hover { color: var(--text, #1F2937); }
+    .view-switcher button.active {
+      background: #FFFFFF;
+      color: var(--primary, #0F4C81);
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+    }
+
+    /* region-row(合并版)— 左侧 ring chart + 中间 region info + 右侧最快/最慢对比 */
+    .region-row {
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .region-row .rr-ring {
+      flex: 0 0 56px;
+      position: relative;
+      width: 44px;
+      height: 44px;
+    }
+    .region-row .rr-ring svg { display: block; }
+    .region-row .rr-ring-label {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      font-size: 8px;
+      font-weight: 700;
+      line-height: 1.05;
+      color: var(--text, #1F2937);
+      font-variant-numeric: tabular-nums;
+      letter-spacing: -0.2px;
+      text-align: center;
+      pointer-events: none;
+    }
+    .region-row .rr-ring-label .rr-ring-total {
+      font-size: 7px;
+      font-weight: 500;
+      color: var(--meta, #666666);
+    }
+    .region-row .rr-info {
+      flex: 0 0 80px;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .region-row .rr-name {
+      font-weight: 600;
+      color: var(--text, #1F2937);
+      font-size: 13px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .region-row .rr-p50 {
+      font-size: 10px;
+      color: var(--meta, #666666);
+      font-variant-numeric: tabular-nums;
+    }
+    .region-row .rr-fs {
+      flex: 1;
+      min-width: 220px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .region-row .rr-fs-line {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--meta, #666666);
+      flex-wrap: wrap;
+    }
+    .region-row .fs-fast { color: var(--ok, #22C55E); font-weight: 600; }
+    .region-row .fs-slow { color: var(--err, #EF4444); font-weight: 600; }
+    .region-row .fs-name {
+      max-width: 110px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: var(--text, #1F2937);
+      font-weight: 500;
+    }
+    .region-row .fs-ratio {
+      margin-left: auto;
+      color: var(--secondary, #6B7280);
+      font-variant-numeric: tabular-nums;
+      font-weight: 600;
+    }
+    .region-row .fs-bar {
+      flex: 1;
+      min-width: 80px;
+      height: 6px;
+      background: linear-gradient(
+        to right,
+        var(--ok, #22C55E) 0%,
+        var(--warn, #F59E0B) 50%,
+        var(--err, #EF4444) 100%
+      );
+      border-radius: 3px;
+      position: relative;
+    }
+    .region-row .fs-bar .marker {
+      position: absolute;
+      top: -3px;
+      width: 2px;
+      height: 12px;
+      background: var(--text, #1F2937);
+      transform: translateX(-1px);
+      border-radius: 1px;
+    }
+    .region-row .fs-bar-wrap {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .region-row .fs-bar-wrap .fs-range {
+      font-size: 10px;
+      color: var(--secondary, #6B7280);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    /* 卡片头右侧分段控件(view-switcher 容器)— 让卡片头能容纳标题 + 切换 */
+    .chart-card-head .head-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <main class="page">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-dot"></div>
+        <h1>TunnelWatch</h1>
+      </div>
+      <div class="view-switcher" id="view-switcher" role="tablist" aria-label="时间窗口">
+        <button type="button" data-hours="24"  class="active" role="tab" aria-selected="true">24h</button>
+        <button type="button" data-hours="168" role="tab" aria-selected="false">7d</button>
+        <button type="button" data-hours="720" role="tab" aria-selected="false">30d</button>
+      </div>
+      <div class="device-picker">
+        <label for="device-select">设备</label>
+        <select id="device-select"><option value="">加载中…</option></select>
+      </div>
+    </header>
+
+    <div class="masonry">
+
+      <!-- 卡片镜像:复刻 Android widget 4×1 的视觉 -->
+      <section class="widget-mirror" id="widget-mirror">
+        <div class="widget-header">
+          <div class="widget-server" id="mirror-server">—</div>
+          <div class="widget-update" id="mirror-update">更新于 --</div>
+        </div>
+        <div class="widget-row uid-row" id="mirror-uid-row">— 暂无账号 —</div>
+        <div class="widget-row sub-row" id="mirror-sub-row">— 暂无订阅源 —</div>
+        <div class="widget-meta" id="mirror-meta">—</div>
+      </section>
+
+      <!-- PRIMARY: 续费建议榜 — 综合分 + 续费建议 -->
+      <section class="chart-card" id="renewal-card">
+        <div class="chart-card-head">
+          <h2>续费建议榜</h2>
+          <span class="chart-hint">按综合分降序 · 实时(最新快照)</span>
+        </div>
+        <div id="renewal-list">— 暂无数据 —</div>
+      </section>
+
+      <!-- PRIMARY: 按地区 — 节点数排序 + ring chart + OK 率 + p50 + 最快/最慢 -->
+      <section class="region-card chart-card" id="region-card">
+        <div class="chart-card-head">
+          <h2>按地区</h2>
+          <div class="head-right">
+            <span class="chart-hint" id="region-hint">当前快照 · OK 率 + p50 + 最快 ⚡ / 最慢 🐌</span>
+            <div class="view-switcher" id="region-sort-switcher" role="tablist" aria-label="节点数排序">
+              <button type="button" data-sort="desc" class="active" role="tab" aria-selected="true">↓ 节点数</button>
+              <button type="button" data-sort="asc"  role="tab" aria-selected="false">↑ 节点数</button>
+            </div>
+          </div>
+        </div>
+        <div class="region-list" id="region-list">— 暂无数据 —</div>
+      </section>
+
+      <!-- 协议分布(pie) -->
+      <section class="chart-card">
+        <div class="chart-card-head">
+          <h2>节点按协议</h2>
+          <span class="chart-hint">当前快照</span>
+        </div>
+        <div class="chart-wrap"><canvas id="chart-protocol"></canvas></div>
+      </section>
+
+      <!-- 24h 趋势图(监测的核心价值) -->
+      <section class="chart-card">
+        <div class="chart-card-head">
+          <h2 data-hours-title="{H} 节点 OK 率">{H} 节点 OK 率</h2>
+          <span class="chart-hint">按账号分组,百分比</span>
+        </div>
+        <div class="chart-wrap"><canvas id="chart-ok-rate"></canvas></div>
+      </section>
+
+      <section class="chart-card">
+        <div class="chart-card-head">
+          <h2 data-hours-title="{H} 节点延迟">{H} 节点延迟</h2>
+          <span class="chart-hint">全量 p50 / p95 (ms)</span>
+        </div>
+        <div class="chart-wrap"><canvas id="chart-latency"></canvas></div>
+      </section>
+
+      <section class="chart-card">
+        <div class="chart-card-head">
+          <h2 data-hours-title="{H} 节点延迟 p50">{H} 节点延迟 p50</h2>
+          <span class="chart-hint">按地区分组 (ms)</span>
+        </div>
+        <div class="chart-wrap"><canvas id="chart-region-latency"></canvas></div>
+      </section>
+
+      <section class="chart-card">
+        <div class="chart-card-head">
+          <h2 data-hours-title="{H} 订阅源 OK 率">{H} 订阅源 OK 率</h2>
+          <span class="chart-hint">按订阅源分组,百分比</span>
+        </div>
+        <div class="chart-wrap"><canvas id="chart-sub-ok-rate"></canvas></div>
+      </section>
+
+      <section class="chart-card">
+        <div class="chart-card-head">
+          <h2 data-hours-title="{H} 流量变化">{H} 流量变化</h2>
+          <span class="chart-hint">已用 / 总量 (GB)</span>
+        </div>
+        <div class="chart-wrap"><canvas id="chart-traffic"></canvas></div>
+      </section>
+
+      <section class="chart-card">
+        <div class="chart-card-head">
+          <h2 data-hours-title="{H} 订阅源连通性">{H} 订阅源连通性</h2>
+          <span class="chart-hint">OK / 超时 / 失败</span>
+        </div>
+        <div class="chart-wrap"><canvas id="chart-sub-conn"></canvas></div>
+      </section>
+
+      <section class="chart-card">
+        <div class="chart-card-head">
+          <h2 data-hours-title="{H} 失败节点数">{H} 失败节点数</h2>
+          <span class="chart-hint" data-bucket-hint>按 {B} 桶</span>
+        </div>
+        <div class="chart-wrap"><canvas id="chart-fail-count"></canvas></div>
+      </section>
+
+      <section class="chart-card">
+        <div class="chart-card-head">
+          <h2 data-hours-title="{H} 流量速率">{H} 流量速率</h2>
+          <span class="chart-hint" data-bucket-hint>每 {B} 增量 (GB)</span>
+        </div>
+        <div class="chart-wrap"><canvas id="chart-traffic-rate"></canvas></div>
+      </section>
+
+    </div>
+
+    <footer class="page-footer">
+      <span id="footer-status">加载中…</span>
+    </footer>
+  </main>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>
