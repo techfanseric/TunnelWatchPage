@@ -2,7 +2,7 @@
 // 拿指定设备指定 kind 的最新一条快照;不传 device 拿所有设备的最新
 // 响应: {device, kind, ts, summary, payload} 或 404
 import type { PagesFunction } from '@cloudflare/workers-types';
-import { normalizeSnapshotSummary } from './_regions.js';
+import { matchEdgeCache, storeEdgeCache } from './_cache';
 
 interface Env {
   DB: D1Database;
@@ -25,6 +25,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
   if (kind !== 'full' && kind !== 'probe') {
     return json({ error: 'kind must be "full" or "probe"' }, 400);
   }
+
+  const cached = await matchEdgeCache(context);
+  if (cached) return cached;
 
   const row = device
     ? await context.env.DB
@@ -56,8 +59,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
   }
 
   const payload = safeParse(row.payload_json);
-  const summary = normalizeSnapshotSummary(safeParse(row.summary_json), payload);
-  return jsonWithEtag({
+  // ingest 已统一规范化 summary;读取时不要再次遍历大 payload,避免 Free Worker CPU 超限。
+  const summary = safeParse(row.summary_json);
+  return storeEdgeCache(context, jsonWithEtag({
     id: row.id,
     device: row.device_uuid,
     deviceName: row.device_name,
@@ -65,7 +69,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     ts: row.ts,
     summary,
     payload,
-  }, etag);
+  }, etag), 120);
 };
 
 function safeParse(s: string): unknown {

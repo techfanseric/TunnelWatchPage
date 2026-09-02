@@ -19,6 +19,7 @@ interface IngestBody {
 }
 
 const FIFTEEN_MIN_MS = 15 * 60 * 1000;
+const RETENTION_MS = 35 * 24 * 60 * 60 * 1000;
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   const request = context.request;
@@ -63,6 +64,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     .run();
   const dedupDeleted = delResult.meta?.changes ?? 0;
 
+  // Bound history query cost: the UI only exposes a 30d window, with 5d spare.
+  const pruneResult = await env.DB
+    .prepare('DELETE FROM snapshots WHERE device_uuid = ? AND ts < ?')
+    .bind(uuid, Date.now() - RETENTION_MS)
+    .run();
+  const pruned = pruneResult.meta?.changes ?? 0;
+
   // 4. INSERT 新记录
   // Agent 的地区解析规则可能滞后；展示端在唯一入口统一按原始 lines 重算，
   // 确保地区卡片、地图和历史趋势都读取同一份规范化 summary。
@@ -82,6 +90,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     ok: true,
     id: insResult.meta?.last_row_id ?? null,
     dedupDeleted,
+    pruned,
   });
 };
 

@@ -2,15 +2,16 @@
 // - 拉 /api/devices 填充下拉
 // - 拉 /api/latest 渲染卡片镜像
 // - 拉 /api/history 渲染 4 张图
-// - 60 秒自动刷新
+// - 最新状态 2 分钟刷新,历史趋势 15 分钟刷新
 
 import { feature } from 'topojson-client';
 import { geoNaturalEarth1, geoPath } from 'd3-geo';
 
-const REFRESH_MS = 60_000;
+const LATEST_REFRESH_MS = 2 * 60_000;
+const HISTORY_REFRESH_MS = 15 * 60_000;
 // 发版标签 — 每次 `wrangler pages deploy` 前手动 bump 一下,刷新页面看 header 是否更新 → 确认 deploy 生效
 // 格式:YYYY.MM.DD-HHMM(本地时间),不需要严格 semver,关键是要"每次发版都换字符串"
-const APP_VERSION = '2026.09.01-2337';
+const APP_VERSION = '2026.09.02-0836';
 // 世界地图 TopoJSON 来源(importmap 把 d3-geo/topojson-client 解析到 jsdelivr ESM,JSON 走 fetch 避免 MIME 限制)
 const WORLD_TOPO_URL = '/vendor/world-50m.json';
 // Chart.js 不解析 CSS var(),要写 hex
@@ -35,6 +36,11 @@ let currentDevice = null;     // uuid
 let currentHours = 24;        // 时间窗:24 / 168 / 720(24h / 7d / 30d)
 let currentRegionSort = 'count';    // 按地区 排序:'count' 充裕在前(节点数降序) / 'latency' ⚡延迟快(p50 升序)
 let currentRenewalSort = 'expiry';  // 续费建议榜 排序:'expiry' 快到期(到期天数升序) / 'score' 推荐高(综合分降序)
+// 设备列表本地缓存(loadDevices 拉一次后存这里,弹层 / 角标 / footer 都要查)
+let devices = [];
+// 静默时段默认值(分钟数 0..1439)— spec §2
+const QUIET_DEFAULT_START = 0;    // 00:00
+const QUIET_DEFAULT_END = 480;    // 08:00
 // 订阅源连通性 / 失败节点数 两张图固定为"时间趋势"折线图:
 //   连通性  — x=时间,每订阅源一条线(每 sub 的失败节点数随时间变化)
 //   失败节点 — x=时间,各地区一条线(各 region 失败节点数随时间变化)
@@ -63,8 +69,8 @@ let lastHistoryItems = null;
 let lastHistoryHours = null;
 // 缓存 world-atlas GeoJSON(50m,模块加载完就解析一次)
 let worldGeoFeatures = null;
-// ---------- ETag + 304 + in-flight dedup(60s 轮询不重渲的核心) ----------
-// 同一个 URL 在同一轮 refreshAll 里有多个 render 函数并发打,用 inFlight 复用同一个 Promise
+// ---------- ETag + 304 + in-flight dedup(轮询不重渲的核心) ----------
+// 同一个 URL 在同一轮刷新里有多个 render 函数并发打,用 inFlight 复用同一个 Promise
 // 命中 304 时直接返回上一次的对象引用,render 函数通过 === 对比决定要不要重渲 DOM/Chart
 const inflight = new Map();   // url -> Promise<{ data, etag }>
 const dataCache = new Map();  // url -> { data, etag }
@@ -139,24 +145,26 @@ function clearDataCache() {
   // 保留 lastHistoryItems/worldGeoFeatures 这两个非 ETag 缓存(地图和 TopoJSON 还可用)
 }
 
-let refreshTimer = null;
-function startRefreshTimer() {
-  if (refreshTimer) return;
-  refreshTimer = setInterval(refreshAll, REFRESH_MS);
+let latestRefreshTimer = null;
+let historyRefreshTimer = null;
+function startRefreshTimers() {
+  if (!latestRefreshTimer) latestRefreshTimer = setInterval(refreshLatest, LATEST_REFRESH_MS);
+  if (!historyRefreshTimer) historyRefreshTimer = setInterval(refreshHistory, HISTORY_REFRESH_MS);
 }
-function stopRefreshTimer() {
-  if (!refreshTimer) return;
-  clearInterval(refreshTimer);
-  refreshTimer = null;
+function stopRefreshTimers() {
+  if (latestRefreshTimer) clearInterval(latestRefreshTimer);
+  if (historyRefreshTimer) clearInterval(historyRefreshTimer);
+  latestRefreshTimer = null;
+  historyRefreshTimer = null;
 }
 // 后台标签页暂停轮询(visibility 隐藏时浏览器本身会节流 setInterval,但显式停掉更可控)
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
-    stopRefreshTimer();
+    stopRefreshTimers();
   } else {
-    // 回到前台立刻拉一次(用户期望看到最新),再恢复定时器
-    refreshAll();
-    startRefreshTimer();
+    // 回到前台只拉轻量最新状态;历史数据继续服从 15 分钟周期。
+    refreshLatest();
+    startRefreshTimers();
   }
 });
 
@@ -165,6 +173,7 @@ async function init() {
   wireViewSwitcher();
   wireRegionSortSwitcher();
   wireRenewalSortSwitcher();
+  wireQuietHours();
   syncViewSwitcherActive();   // URL 参数 / default 同步到按钮高亮
   updateChartTitles();   // 初始化时就把 {H} 占位符替换掉(默认 24h)
   updateBucketHint(HOURS_BUCKET_MIN[currentHours] || 15);
@@ -172,7 +181,7 @@ async function init() {
   const v = document.getElementById('brand-version');
   if (v) v.textContent = 'Version. ' + APP_VERSION;
   await loadDevices();
-  startRefreshTimer();
+  startRefreshTimers();
 }
 
 function syncViewSwitcherActive() {
@@ -202,7 +211,7 @@ function wireViewSwitcher() {
     updateChartTitles();
     // hours 变了 → history URL 变了,清掉旧 hours 的 lastDataRef(让新 hours 强制走 200 拉一次)
     lastDataRef.history = null;
-    refreshAll();   // refreshAll 末尾会调 renderWorldMapCard(避免重复 fetch)
+    refreshHistory();
   });
 }
 
@@ -257,12 +266,15 @@ function updateChartTitles() {
 async function loadDevices() {
   try {
     const res = await fetch('/api/devices');
-    const { devices } = await res.json();
+    const data = await res.json();
+    devices = (data && data.devices) || [];
     const sel = document.getElementById('device-select');
     sel.innerHTML = '';
-    if (!devices || devices.length === 0) {
+    if (devices.length === 0) {
       sel.innerHTML = '<option value="">未授权设备</option>';
       setFooter('未授权设备 — wrangler d1 execute 注册 UUID', false);
+      recomputeQuietBadge();
+      recomputeQuietStatus();
       return;
     }
     devices.forEach(d => {
@@ -279,12 +291,18 @@ async function loadDevices() {
       refreshAll();
       if (!sharedBillToken && !isSharedView) loadBills();
       loadBillSources();
+      // 静默时段相关的 UI 也得跟着设备切:角标、footer 状态、弹层(若开着)
+      onCurrentDeviceChanged();
     });
     // 默认选上次记忆的,否则第一个
     const remembered = localStorage.getItem('tw_device');
     const target = devices.find(d => d.uuid === remembered) || devices[0];
     sel.value = target.uuid;
     currentDevice = target.uuid;
+    // 初次进入也要刷一下静默时段相关的 UI
+    recomputeQuietBadge();
+    recomputeQuietStatus();
+    startQuietHoursTimer();
     await Promise.all([
       refreshAll(),
       sharedBillToken
@@ -301,18 +319,34 @@ async function loadDevices() {
 
 async function refreshAll() {
   if (!currentDevice) return;
-  const results = await Promise.all([
-    renderMirror(),
-    renderRenewalCard(),
-    renderRegionCard(),
-    renderProtocolChart(),
-    renderCharts(currentHours),
+  const groups = await Promise.all([
+    refreshLatest({ updateFooter: false }),
+    refreshHistory({ updateFooter: false }),
   ]);
+  updateRefreshFooter(groups.flat());
+}
+
+async function refreshLatest({ updateFooter = true } = {}) {
+  if (!currentDevice) return [];
+  const results = await Promise.all([renderMirror(), renderRegionCard(), renderProtocolChart()]);
+  // 24h 地图取 latest;长时间窗地图由 refreshHistory 使用已有 history 数据。
+  if (currentHours === 24) renderWorldMapCard();
+  if (updateFooter) updateRefreshFooter(results);
+  return results;
+}
+
+async function refreshHistory({ updateFooter = true } = {}) {
+  if (!currentDevice) return [];
+  const results = await Promise.all([renderRenewalCard(), renderCharts(currentHours)]);
+  renderWorldMapCard();
+  if (updateFooter) updateRefreshFooter(results);
+  return results;
+}
+
+function updateRefreshFooter(results) {
   // results: 每个 render 返回 true=已更新 / false=无变化/失败
   // "无变化"指服务端 304 命中(数据未变)→ render 函数早早 return false,DOM/Chart 不动
   const changed = results.filter(Boolean).length;
-  // 世界地图用 lastHistoryItems 复用,不计"额外"卡片
-  renderWorldMapCard();
   const ts = new Date().toLocaleTimeString('zh-CN', { hour12: false });
   setFooter(
     changed === 0
@@ -1850,4 +1884,193 @@ function escapeHtml(s) {
 function setFooter(text, ok) {
   const el = document.getElementById('footer-status');
   el.innerHTML = `<span class="pulse" style="background:${ok ? COLORS.ok : COLORS.err}"></span>${escapeHtml(text)}`;
+}
+
+// ---------- Quiet hours (静默时段) ----------
+// 分钟数 (0..1439) → "HH:MM" 字符串(24h,前导零)
+function formatMinutes(m) {
+  const mm = Math.max(0, Math.min(1439, Math.floor(m) || 0));
+  return String(Math.floor(mm / 60)).padStart(2, '0') + ':' + String(mm % 60).padStart(2, '0');
+}
+// "HH:MM" → 分钟数(无效返回 null)
+function parseTimeInput(value) {
+  if (typeof value !== 'string') return null;
+  const m = value.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const h = parseInt(m[1], 10);
+  const mm = parseInt(m[2], 10);
+  if (h < 0 || h > 23 || mm < 0 || mm > 59) return null;
+  return h * 60 + mm;
+}
+// 当前设备时间是否落在 [start, end) 内
+//   start == end → 禁用,永远 false
+//   start <  end → 同一天窗口
+//   start >  end → 跨午夜(now >= start || now < end)
+function isInQuietMinutes(now, start, end) {
+  if (start == null || end == null) return false;
+  if (start === end) return false;
+  const minute = now.getHours() * 60 + now.getMinutes();
+  return start < end ? (minute >= start && minute < end) : (minute >= start || minute < end);
+}
+// 找当前 device 记录(用于弹层 / 角标 / footer 状态)
+function getCurrentDeviceRecord() {
+  if (!currentDevice) return null;
+  return devices.find(d => d.uuid === currentDevice) || null;
+}
+// 设备切换后:刷新角标 + footer 状态 + 弹层(若开着)
+function onCurrentDeviceChanged() {
+  recomputeQuietBadge();
+  recomputeQuietStatus();
+  // 弹层开着就重新预填(用户改 device 时弹层若开着要更新)
+  const dlg = document.getElementById('quiet-hours-dialog');
+  if (dlg && dlg.open) {
+    const d = getCurrentDeviceRecord();
+    if (d) {
+      document.getElementById('quiet-hours-device-name').textContent = d.name;
+      document.getElementById('quiet-hours-start').value = formatMinutes(d.quietHourStart ?? QUIET_DEFAULT_START);
+      document.getElementById('quiet-hours-end').value = formatMinutes(d.quietHourEnd ?? QUIET_DEFAULT_END);
+      document.getElementById('quiet-hours-error').hidden = true;
+    }
+  }
+}
+// 设备名旁的角标(🌙 00:00-08:00)— start==end 隐藏
+function recomputeQuietBadge() {
+  const el = document.getElementById('device-quiet-badge');
+  if (!el) return;
+  const d = getCurrentDeviceRecord();
+  if (!d) { el.hidden = true; el.textContent = ''; return; }
+  const start = d.quietHourStart;
+  const end = d.quietHourEnd;
+  if (start == null || end == null || start === end) {
+    el.hidden = true;
+    el.textContent = '';
+  } else {
+    el.textContent = '🌙 ' + formatMinutes(start) + '-' + formatMinutes(end);
+    el.hidden = false;
+  }
+}
+// footer 状态行:在静默窗口内显示一行提示
+function recomputeQuietStatus() {
+  const el = document.getElementById('quiet-hours-status');
+  if (!el) return;
+  const d = getCurrentDeviceRecord();
+  if (!d) { el.hidden = true; el.textContent = ''; return; }
+  const start = d.quietHourStart;
+  const end = d.quietHourEnd;
+  if (start == null || end == null || start === end) {
+    el.hidden = true; el.textContent = '';
+    return;
+  }
+  if (isInQuietMinutes(new Date(), start, end)) {
+    el.textContent = `🌙 静默时段中(${formatMinutes(start)}-${formatMinutes(end)}),Agent 本地测活正常,云端暂停上报。`;
+    el.hidden = false;
+  } else {
+    el.textContent = '';
+    el.hidden = true;
+  }
+}
+let quietHoursTimer = null;
+function startQuietHoursTimer() {
+  if (quietHoursTimer) return;
+  // 立即算一次,然后每分钟重算
+  recomputeQuietStatus();
+  quietHoursTimer = setInterval(recomputeQuietStatus, 60_000);
+}
+
+function wireQuietHours() {
+  const btn = document.getElementById('device-settings-btn');
+  if (btn) btn.addEventListener('click', openQuietHoursDialog);
+  const save = document.getElementById('quiet-hours-save');
+  if (save) save.addEventListener('click', saveQuietHours);
+  const reset = document.getElementById('quiet-hours-reset');
+  if (reset) reset.addEventListener('click', () => {
+    document.getElementById('quiet-hours-start').value = formatMinutes(QUIET_DEFAULT_START);
+    document.getElementById('quiet-hours-end').value = formatMinutes(QUIET_DEFAULT_END);
+    document.getElementById('quiet-hours-error').hidden = true;
+  });
+  const cancel = document.getElementById('quiet-hours-cancel');
+  if (cancel) cancel.addEventListener('click', closeQuietHoursDialog);
+}
+
+function openQuietHoursDialog() {
+  if (!currentDevice) return;
+  const d = getCurrentDeviceRecord();
+  if (!d) return;
+  const dlg = document.getElementById('quiet-hours-dialog');
+  if (!dlg) return;
+  document.getElementById('quiet-hours-device-name').textContent = d.name;
+  document.getElementById('quiet-hours-start').value = formatMinutes(d.quietHourStart ?? QUIET_DEFAULT_START);
+  document.getElementById('quiet-hours-end').value = formatMinutes(d.quietHourEnd ?? QUIET_DEFAULT_END);
+  document.getElementById('quiet-hours-error').hidden = true;
+  if (typeof dlg.showModal === 'function') dlg.showModal();
+  else dlg.setAttribute('open', '');
+}
+
+function closeQuietHoursDialog() {
+  const dlg = document.getElementById('quiet-hours-dialog');
+  if (!dlg) return;
+  if (typeof dlg.close === 'function' && dlg.open) dlg.close();
+  else dlg.removeAttribute('open');
+}
+
+function showQuietHoursError(text) {
+  const el = document.getElementById('quiet-hours-error');
+  if (!el) return;
+  el.textContent = text;
+  el.hidden = false;
+}
+
+async function saveQuietHours() {
+  if (!currentDevice) return;
+  const startVal = document.getElementById('quiet-hours-start').value;
+  const endVal = document.getElementById('quiet-hours-end').value;
+  const start = parseTimeInput(startVal);
+  const end = parseTimeInput(endVal);
+  if (start == null || end == null) {
+    showQuietHoursError('时间格式无效,需为 HH:MM');
+    return;
+  }
+  // 强制 5min 步进(input step=300 已经在 UI 限制,这里再 defense-in-depth 一次)
+  if (start % 5 !== 0 || end % 5 !== 0) {
+    showQuietHoursError('必须是 5 分钟步进');
+    return;
+  }
+  const errEl = document.getElementById('quiet-hours-error');
+  errEl.hidden = true;
+  const saveBtn = document.getElementById('quiet-hours-save');
+  saveBtn.disabled = true;
+  try {
+    const res = await fetch(`/api/devices/${encodeURIComponent(currentDevice)}`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Device-Uuid': currentDevice,
+      },
+      body: JSON.stringify({ quietHourStart: start, quietHourEnd: end }),
+    });
+    if (!res.ok) {
+      let display = `HTTP ${res.status}`;
+      try {
+        const j = await res.json();
+        if (j && j.error) display = j.error;
+      } catch { /* not json */ }
+      showQuietHoursError('保存失败: ' + display);
+      return;
+    }
+    const updated = await res.json();
+    // 乐观更新内存里的 device 记录(API 600s 边缘缓存,等不等 GET 都行)
+    const d = getCurrentDeviceRecord();
+    if (d) {
+      if (typeof updated.quietHourStart === 'number') d.quietHourStart = updated.quietHourStart;
+      if (typeof updated.quietHourEnd === 'number') d.quietHourEnd = updated.quietHourEnd;
+    }
+    closeQuietHoursDialog();
+    recomputeQuietBadge();
+    recomputeQuietStatus();
+    setFooter(`静默时段已保存 · ${formatMinutes(start)}-${formatMinutes(end)}`, true);
+  } catch (e) {
+    showQuietHoursError('保存失败: ' + (e && e.message ? e.message : String(e)));
+  } finally {
+    saveBtn.disabled = false;
+  }
 }

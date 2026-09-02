@@ -1,7 +1,8 @@
 // GET /api/devices
 // 拿授权设备列表 — 前端设备下拉框用
-// 响应: { devices: [{uuid, name, createdAt, lastSeenAt}] }
+// 响应: { devices: [{uuid, name, createdAt, lastSeenAt, quietHourStart, quietHourEnd}] }
 import type { PagesFunction } from '@cloudflare/workers-types';
+import { matchEdgeCache, storeEdgeCache } from './_cache';
 
 interface Env {
   DB: D1Database;
@@ -12,31 +13,44 @@ interface DeviceRow {
   name: string;
   created_at: string;
   last_seen_at: number | null;
+  quiet_hour_start: number;
+  quiet_hour_end: number;
 }
 
 export const onRequestGet: PagesFunction<Env> = async (context) => {
+  const cached = await matchEdgeCache(context);
+  if (cached) return cached;
+
   const result = await context.env.DB
     .prepare(
       `SELECT
          d.uuid,
          d.name,
          d.created_at,
-         COALESCE(MAX(s.ts), 0) AS last_seen_at
+         d.quiet_hour_start,
+         d.quiet_hour_end,
+         COALESCE((
+           SELECT s.ts
+           FROM snapshots s
+           WHERE s.device_uuid = d.uuid
+           ORDER BY s.ts DESC
+           LIMIT 1
+         ), 0) AS last_seen_at
        FROM devices d
-       LEFT JOIN snapshots s ON s.device_uuid = d.uuid
-       GROUP BY d.uuid, d.name, d.created_at
        ORDER BY d.created_at ASC`
     )
     .all<DeviceRow>();
 
-  return json({
+  return storeEdgeCache(context, json({
     devices: (result.results || []).map((d) => ({
       uuid: d.uuid,
       name: d.name,
       createdAt: d.created_at,
       lastSeenAt: d.last_seen_at,
+      quietHourStart: d.quiet_hour_start,
+      quietHourEnd: d.quiet_hour_end,
     })),
-  });
+  }), 600);
 };
 
 function json(obj: unknown, status = 200): Response {
