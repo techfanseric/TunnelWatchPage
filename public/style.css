@@ -814,6 +814,47 @@ body.is-share-mode .brand h1 { font-size: 16px; }
   font-size: 11px;
   color: var(--secondary);
 }
+
+/* D1 配额余量 widget — /api/usage 数据驱动 */
+.usage-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 12px;
+  font-size: 10.5px;
+  color: var(--secondary);
+  vertical-align: middle;
+}
+.usage-meter .usage-label {
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  color: var(--meta, #666666);
+}
+.usage-meter .usage-text {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--text, #1F2937);
+  white-space: nowrap;
+  cursor: default;
+}
+.usage-meter .usage-bar {
+  width: 72px;
+  height: 5px;
+  background: var(--surface-2, #F4F6FA);
+  border: 1px solid var(--border, #E5E7EB);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.usage-meter .usage-bar-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--ok, #22C55E);
+  transition: width 0.4s ease, background 0.4s ease;
+}
+.usage-meter.warn   .usage-bar-fill { background: var(--warn, #F59E0B); }
+.usage-meter.danger .usage-bar-fill { background: var(--err,  #EF4444); }
+.usage-meter.error  .usage-text    { color: var(--err, #EF4444); }
+.usage-meter.danger .usage-text    { color: var(--err, #EF4444); }
 .page-footer .pulse {
   display: inline-block;
   width: 6px;

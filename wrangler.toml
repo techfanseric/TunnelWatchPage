@@ -12,3 +12,20 @@ compatibility_flags = ["nodejs_compat"]
 binding = "DB"
 database_name = "tunnelwatch"
 database_id = "0dc9db60-42fb-435c-921a-f5c3ec3bdefc"
+
+# /api/usage 通过 Cloudflare GraphQL Analytics API 拉 D1 今日 rowsRead
+# (用于页面上"D1 今日 X / 5M"widget,可视化 free plan 配额余量)
+#
+# 必填 — 公开 var(账号 ID / D1 ID 不是 secret):
+[vars]
+CF_ACCOUNT_ID = "acaba0e593f76d3a1962b9169dfc51fc"
+D1_DATABASE_ID = "0dc9db60-42fb-435c-921a-f5c3ec3bdefc"
+#
+# 必填 — secret(自己创建 API token,只给 Account Analytics:Read 权限):
+#   1. 打开 https://dash.cloudflare.com/profile/api-tokens
+#   2. Create Custom Token:Permissions = Account Analytics:Read,
+#      Account Resources = Include → 你的账号
+#   3. 复制 token,跑:
+#        wrangler pages secret put CF_API_TOKEN
+#   4. 不用重新 deploy,刷新页面 widget 立即生效
+#   详细见 AGENTS.md「5. D1 配额 widget 配置」

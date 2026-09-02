@@ -1,19 +1,30 @@
 import type { PagesFunction } from '@cloudflare/workers-types';
+import { cachedD1 } from './_cache';
 import { BillInput, BillRow, Env, PERSONAL_OWNER, json, parseBillInput, requireDevice, toBill } from './_billing';
+
+const BILLS_CACHE_KEY = 'GET:/api/bills';
+const BILLS_CACHE_TTL_MS = 30_000;
 
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   const device = await requireDevice(context.request, context.env);
   if (device instanceof Response) return device;
-  const result = await context.env.DB.prepare(
-    `SELECT * FROM bills WHERE owner_id = ? ORDER BY paid_on DESC, id DESC LIMIT 300`
-  ).bind(PERSONAL_OWNER).all<BillRow>();
-  const payerRows = await context.env.DB.prepare(
-    `SELECT DISTINCT payer FROM bills WHERE owner_id = ? AND payer <> '' ORDER BY payer COLLATE NOCASE ASC LIMIT 200`
-  ).bind(PERSONAL_OWNER).all<{ payer: string }>();
-  return json({
-    bills: (result.results || []).map((row) => toBill(row, context.request.url)),
-    payers: (payerRows.results || []).map((r) => r.payer),
-  });
+
+  return cachedD1<Env>(
+    BILLS_CACHE_KEY,
+    BILLS_CACHE_TTL_MS,
+    async () => {
+      const result = await context.env.DB.prepare(
+        `SELECT * FROM bills WHERE owner_id = ? ORDER BY paid_on DESC, id DESC LIMIT 300`
+      ).bind(PERSONAL_OWNER).all<BillRow>();
+      const payerRows = await context.env.DB.prepare(
+        `SELECT DISTINCT payer FROM bills WHERE owner_id = ? AND payer <> '' ORDER BY payer COLLATE NOCASE ASC LIMIT 200`
+      ).bind(PERSONAL_OWNER).all<{ payer: string }>();
+      return json({
+        bills: (result.results || []).map((row) => toBill(row, context.request.url)),
+        payers: (payerRows.results || []).map((r) => r.payer),
+      });
+    },
+  );
 };
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {

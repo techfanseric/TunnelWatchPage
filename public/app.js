@@ -11,7 +11,7 @@ const LATEST_REFRESH_MS = 2 * 60_000;
 const HISTORY_REFRESH_MS = 15 * 60_000;
 // 发版标签 — 每次 `wrangler pages deploy` 前手动 bump 一下,刷新页面看 header 是否更新 → 确认 deploy 生效
 // 格式:YYYY.MM.DD-HHMM(本地时间),不需要严格 semver,关键是要"每次发版都换字符串"
-const APP_VERSION = '2026.09.02-0836';
+const APP_VERSION = '2026.09.02-1052';
 // 世界地图 TopoJSON 来源(importmap 把 d3-geo/topojson-client 解析到 jsdelivr ESM,JSON 走 fetch 避免 MIME 限制)
 const WORLD_TOPO_URL = '/vendor/world-50m.json';
 // Chart.js 不解析 CSS var(),要写 hex
@@ -157,14 +157,83 @@ function stopRefreshTimers() {
   latestRefreshTimer = null;
   historyRefreshTimer = null;
 }
+
+// D1 配额 widget — /api/usage,5min 一刷。edge cache 5min,实际打到 GraphQL
+// 频率取决于网络边缘节点数 × 用户数,正常情况一天 < 200 次,远低于 CF GraphQL 限速
+const USAGE_REFRESH_MS = 5 * 60_000;
+let usageRefreshTimer = null;
+function startUsageTimer() {
+  loadUsage();
+  if (usageRefreshTimer) return;
+  usageRefreshTimer = setInterval(loadUsage, USAGE_REFRESH_MS);
+}
+function stopUsageTimer() {
+  if (usageRefreshTimer) { clearInterval(usageRefreshTimer); usageRefreshTimer = null; }
+}
+
+async function loadUsage() {
+  const meter = document.getElementById('usage-meter');
+  const text  = document.getElementById('usage-text');
+  const fill  = document.getElementById('usage-bar-fill');
+  if (!meter || !text || !fill) return;
+  try {
+    const res = await fetch('/api/usage');
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 503 && data && data.code === 'missing_token') {
+      // 最常见:用户没配 token — 静默提示,不报错打扰
+      text.textContent = 'D1 用量 · 未配置 token';
+      text.title = data.help || data.error || '';
+      meter.classList.remove('warn', 'danger');
+      meter.classList.add('error');
+      fill.style.width = '0%';
+      meter.hidden = false;
+      return;
+    }
+    if (!res.ok || !data || !data.ok) {
+      throw new Error((data && data.error) || ('HTTP ' + res.status));
+    }
+    const rowsRead = data.rowsRead | 0;
+    const limit    = data.limit    | 0;
+    const pct      = Math.max(0, Math.min(100, Number(data.pct) || 0));
+    const resetsAt = data.resetsAt ? new Date(data.resetsAt) : null;
+    text.textContent = `${formatBig(rowsRead)} / ${formatBig(limit)} · ${pct.toFixed(1)}%`;
+    text.title = [
+      `今日 D1 rowsRead: ${rowsRead.toLocaleString()} / ${limit.toLocaleString()}`,
+      `rowsWritten: ${(data.rowsWritten || 0).toLocaleString()}`,
+      resetsAt ? `重置: ${resetsAt.toISOString().replace('T', ' ').slice(0, 16)} UTC` : '',
+    ].filter(Boolean).join('\n');
+    fill.style.width = pct + '%';
+    meter.classList.remove('error');
+    if (pct >= 80) { meter.classList.remove('warn'); meter.classList.add('danger'); }
+    else if (pct >= 50) { meter.classList.remove('danger'); meter.classList.add('warn'); }
+    else { meter.classList.remove('warn', 'danger'); }
+    meter.hidden = false;
+  } catch (e) {
+    text.textContent = 'D1 用量 · 拉取失败';
+    text.title = e && e.message ? e.message : String(e);
+    meter.classList.remove('warn', 'danger');
+    meter.classList.add('error');
+    meter.hidden = false;
+  }
+}
+
+function formatBig(n) {
+  n = Number(n) || 0;
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(n >= 10_000_000 ? 1 : 2) + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(0) + 'K';
+  return String(n);
+}
+
 // 后台标签页暂停轮询(visibility 隐藏时浏览器本身会节流 setInterval,但显式停掉更可控)
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     stopRefreshTimers();
+    stopUsageTimer();
   } else {
     // 回到前台只拉轻量最新状态;历史数据继续服从 15 分钟周期。
     refreshLatest();
     startRefreshTimers();
+    startUsageTimer();
   }
 });
 
@@ -182,6 +251,7 @@ async function init() {
   if (v) v.textContent = 'Version. ' + APP_VERSION;
   await loadDevices();
   startRefreshTimers();
+  startUsageTimer();
 }
 
 function syncViewSwitcherActive() {

@@ -28,7 +28,7 @@
 //   FROM bucketed WHERE rn = 1
 //   ORDER BY bucket_ts ASC
 import type { PagesFunction } from '@cloudflare/workers-types';
-import { matchEdgeCache, storeEdgeCache } from './_cache';
+import { cachedD1, matchEdgeCache, storeEdgeCache } from './_cache';
 
 interface Env {
   DB: D1Database;
@@ -47,6 +47,8 @@ const BUCKET_BY_HOURS: Record<number, { minutes: number; label: string }> = {
   720: { minutes: 240, label: '4h'  },
 };
 
+const HISTORY_CACHE_TTL_MS = 60_000;
+
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   const url = new URL(context.request.url);
   const device = url.searchParams.get('device')?.trim();
@@ -60,9 +62,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
   if (kindFilter && kindFilter !== 'full' && kindFilter !== 'probe') {
     return json({ error: 'kind must be "full" or "probe" or omitted' }, 400);
   }
-  const cached = await matchEdgeCache(context);
-  if (cached) return cached;
 
+  const edgeHit = await matchEdgeCache(context);
+  if (edgeHit) return edgeHit;
+
+  // 决定 bucket — 复制到 cachedD1 闭包外做,然后闭包内只看 bucketMs
   const bucketOverride = url.searchParams.get('bucket'); // '15m' | '1h' | '4h' (调试)
   const cfg = BUCKET_BY_HOURS[hours];
   let bucketMs: number;
@@ -76,64 +80,84 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     bucketLabel = cfg.label;
   }
 
-  const since = Date.now() - hours * 60 * 60 * 1000;
+  // key 包含 device + hours + kind + bucket — 不同组合各自独立 cache
+  const cacheKey = `GET:/api/history?device=${device}&hours=${hours}&kind=${kindFilter ?? 'all'}&bucket=${bucketLabel}`;
 
-  // D1 / SQLite 不支持同时声明多个相同占位符重复利用(实测 1.x 没问题,但保险起见
-  // 用 prepare 出来的语句绑定独立变量,避免 SQL 优化器解析时的歧义)
-  const kinds = kindFilter ? [kindFilter] : ['full', 'probe'];
-  const placeholders = kinds.map(() => '?').join(',');
+  const resp = await cachedD1<Env>(
+    cacheKey,
+    HISTORY_CACHE_TTL_MS,
+    async () => {
+      const since = Date.now() - hours * 60 * 60 * 1000;
 
-  const sql = `
-    WITH bucketed AS (
-      SELECT
-        (ts / ?) * ? AS bucket_ts,
-        summary_json,
-        kind,
-        ROW_NUMBER() OVER (
-          PARTITION BY (ts / ?)
-          ORDER BY ts DESC
-        ) AS rn
-      FROM snapshots
-      WHERE device_uuid = ?
-        AND kind IN (${placeholders})
-        AND ts >= ?
-    )
-    SELECT bucket_ts AS ts, kind, summary_json
-    FROM bucketed
-    WHERE rn = 1
-    ORDER BY ts ASC
-  `;
+      // D1 / SQLite 不支持同时声明多个相同占位符重复利用(实测 1.x 没问题,但保险起见
+      // 用 prepare 出来的语句绑定独立变量,避免 SQL 优化器解析时的歧义)
+      const kinds = kindFilter ? [kindFilter] : ['full', 'probe'];
+      const placeholders = kinds.map(() => '?').join(',');
 
-  const stmt = context.env.DB.prepare(sql).bind(
-    bucketMs, bucketMs,   // PARTITION BY (ts / ?),bucket_ts
-    bucketMs,             // PARTITION BY
-    device,
-    ...kinds,
-    since
+      const sql = `
+        WITH bucketed AS (
+          SELECT
+            (ts / ?) * ? AS bucket_ts,
+            summary_json,
+            kind,
+            ROW_NUMBER() OVER (
+              PARTITION BY (ts / ?)
+              ORDER BY ts DESC
+            ) AS rn
+          FROM snapshots
+          WHERE device_uuid = ?
+            AND kind IN (${placeholders})
+            AND ts >= ?
+        )
+        SELECT bucket_ts AS ts, kind, summary_json
+        FROM bucketed
+        WHERE rn = 1
+        ORDER BY ts ASC
+      `;
+
+      const stmt = context.env.DB.prepare(sql).bind(
+        bucketMs, bucketMs,   // PARTITION BY (ts / ?),bucket_ts
+        bucketMs,             // PARTITION BY
+        device,
+        ...kinds,
+        since
+      );
+
+      const result = await stmt.all<SummaryRow>();
+      const items = (result.results || []).map((r) => ({
+        ts: r.ts,
+        kind: r.kind,
+        // summary 在 ingest 时已规范化;历史查询只读轻量列。
+        summary: safeParse(r.summary_json),
+      }));
+
+      // ETag 用 device + hours + maxTs — 新快照来时 maxTs 必变,客户端命中 304 直接复用旧 items
+      const maxTs = items.length > 0 ? items[items.length - 1].ts : 0;
+      const etag = `W/"regions-v2-${device}-${hours}-${maxTs}-${items.length}"`;
+
+      return jsonWithEtag({
+        device,
+        hours,
+        kind: kindFilter || 'all',
+        bucket: bucketLabel,
+        items,
+      }, etag);
+    },
   );
 
-  const result = await stmt.all<SummaryRow>();
-  const items = (result.results || []).map((r) => ({
-    ts: r.ts,
-    kind: r.kind,
-    // summary 在 ingest 时已规范化;历史查询只读轻量列。
-    summary: safeParse(r.summary_json),
-  }));
-
-  // ETag 用 device + hours + maxTs — 新快照来时 maxTs 必变,客户端命中 304 直接复用旧 items
-  const maxTs = items.length > 0 ? items[items.length - 1].ts : 0;
-  const etag = `W/"regions-v2-${device}-${hours}-${maxTs}-${items.length}"`;
-  if (context.request.headers.get('If-None-Match') === etag) {
-    return new Response(null, { status: 304, headers: { etag } });
+  // 304 处理
+  const etag = resp.headers.get('etag');
+  if (etag && context.request.headers.get('If-None-Match') === etag) {
+    return new Response(null, {
+      status: 304,
+      headers: {
+        etag,
+        'x-tw-mem': resp.headers.get('x-tw-mem') ?? 'MISS',
+      },
+    });
   }
 
-  return storeEdgeCache(context, jsonWithEtag({
-    device,
-    hours,
-    kind: kindFilter || 'all',
-    bucket: bucketLabel,
-    items,
-  }, etag), 900);
+  return storeEdgeCache(context, resp, 900);
 };
 
 function safeParse(s: string): unknown {

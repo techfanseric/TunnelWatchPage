@@ -6,6 +6,8 @@
 // updatedAt 是服务端 UTC ISO 8601 时间戳(无 updated_at 列,见下方说明)。
 import type { PagesFunction } from '@cloudflare/workers-types';
 import { Env, json, requireDevice } from '../_billing';
+import { invalidateKey } from '../_cache';
+import { DEVICES_CACHE_KEY } from '../devices';
 
 interface UpdateBody {
   quietHourStart?: unknown;
@@ -71,6 +73,11 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
   if (!result.meta.changes) {
     return json({ error: 'device not found' }, 404);
   }
+
+  // 清掉 GET /api/devices 的 in-memory cache,让下次 GET 看到新的 quiet hours。
+  // (edge cache 留 600s TTL — 该 endpoint 走 cachedD1 时会先 match edge hit 然后
+  // 提前返回,所以 in-memory 一旦 invalidate 成功,edge miss 路径才会被走到。)
+  invalidateKey(DEVICES_CACHE_KEY);
 
   // 7) 回读,组装响应
   const row = await context.env.DB

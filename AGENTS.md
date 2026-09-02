@@ -78,6 +78,27 @@ npm run db:query "SELECT 1"  # 查本地 D1
 - 30d 视角:bucketed by 2h
 - 单设备 snapshots 可能上千行;前端按 `kind` 优先级 full > probe,按 ts 倒序,只取时间窗内
 
+## 🚨 5. D1 配额 widget(`/api/usage`)
+
+页面 footer 显示"D1 今日 X / 5M(%)"进度条 + 颜色阈值(绿<50% / 黄 50-80% / 红≥80%),用 Cloudflare GraphQL Analytics API 查 `d1AnalyticsAdaptiveGroups.sum.rowsRead`,**查 metrics 本身不消耗 D1 read 配额**。
+
+**默认未配置,需要手动配一次**。否则 widget 显示"D1 用量 · 未配置 token"。
+
+操作步骤:
+1. 打开 https://dash.cloudflare.com/profile/api-tokens
+2. Create Custom Token:
+   - Permissions: **Account → Account Analytics: Read**(只读 scope,泄露也不能改数据)
+   - Account Resources: Include → 当前账号
+3. Create → 复制 token
+4. `wrangler pages secret put CF_API_TOKEN` → 粘贴 token
+5. **不需要重新 deploy**,刷新页面 widget 立即生效
+
+`wrangler.toml` 里 `CF_ACCOUNT_ID` / `D1_DATABASE_ID` 已预填,不是 secret。改 ID 会断 widget。
+
+阈值说明:
+- 5M/day 是 D1 free plan **账号级**总配额(不是单库)。如果账号下还有其他 D1,这个数字会偏低 — 解决方式:在 wrangler.toml 的 `D1_DATABASE_ID` 改用账号聚合(目前 widget 只查这一个 db,需要看其他 db 时改后端 filter)
+- 升级 Workers Paid($5/月)→ 25B+ rows/月,widget 会显示个位数百分比,基本不会变红
+
 ## 不要做
 
 - 不要加框架(React/Vue 等) — 当前 Vanilla JS 故意保持简单
