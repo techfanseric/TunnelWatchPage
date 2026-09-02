@@ -44,6 +44,16 @@ html, body {
 }
 .dashboard-main { min-width: 0; }
 
+.quota-notice {
+  border: 1px solid color-mix(in srgb, var(--err) 35%, var(--border));
+  background: color-mix(in srgb, var(--err) 5%, var(--surface));
+  color: #862c2c;
+  padding: 12px 16px;
+  overflow-wrap: anywhere;
+}
+.quota-notice strong { font-size: 14px; }
+.quota-notice p { margin: 4px 0 0; font-size: 12px; line-height: 1.6; }
+
 /* ---------- Billing receipt rail ---------- */
 .receipt-rail {
   position: sticky;

@@ -27,5 +27,5 @@ D1_DATABASE_ID = "0dc9db60-42fb-435c-921a-f5c3ec3bdefc"
 #      Account Resources = Include → 你的账号
 #   3. 复制 token,跑:
 #        wrangler pages secret put CF_API_TOKEN
-#   4. 不用重新 deploy,刷新页面 widget 立即生效
+#   4. 更新 APP_VERSION 后重新 deploy，新部署才会绑定 Secret；再验证 /api/usage。
 #   详细见 AGENTS.md「5. D1 配额 widget 配置」

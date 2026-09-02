@@ -11,7 +11,7 @@ const LATEST_REFRESH_MS = 2 * 60_000;
 const HISTORY_REFRESH_MS = 15 * 60_000;
 // 发版标签 — 每次 `wrangler pages deploy` 前手动 bump 一下,刷新页面看 header 是否更新 → 确认 deploy 生效
 // 格式:YYYY.MM.DD-HHMM(本地时间),不需要严格 semver,关键是要"每次发版都换字符串"
-const APP_VERSION = '2026.09.02-1052';
+const APP_VERSION = '2026.09.02-1200';
 // 世界地图 TopoJSON 来源(importmap 把 d3-geo/topojson-client 解析到 jsdelivr ESM,JSON 走 fetch 避免 MIME 限制)
 const WORLD_TOPO_URL = '/vendor/world-50m.json';
 // Chart.js 不解析 CSS var(),要写 hex
@@ -121,14 +121,18 @@ async function fetchJSON(url) {
       // 边界:第一次就 304(不会发生,服务端只在有缓存时 304),保护性抛错
       throw new Error('304 without prior cache');
     }
-    if (!res.ok) throw new Error('HTTP ' + res.status);
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({}));
+      noteQuotaFailure(error);
+      throw new Error(error.message || 'HTTP ' + res.status);
+    }
     const data = await res.json();
     const entry = { data, etag: res.headers.get('ETag') };
     dataCache.set(url, entry);
     return entry;
   })();
   inflight.set(url, p);
-  p.finally(() => inflight.delete(url));
+  p.then(() => inflight.delete(url), () => inflight.delete(url));
   return p;
 }
 
@@ -162,6 +166,33 @@ function stopRefreshTimers() {
 // 频率取决于网络边缘节点数 × 用户数,正常情况一天 < 200 次,远低于 CF GraphQL 限速
 const USAGE_REFRESH_MS = 5 * 60_000;
 let usageRefreshTimer = null;
+let latestUsage = null;
+let quotaFailureAt = 0;
+
+function noteQuotaFailure(data) {
+  if (data?.error === 'D1_DAILY_READ_LIMIT') {
+    quotaFailureAt = Date.now();
+    renderQuotaNotice();
+  }
+}
+
+function renderQuotaNotice() {
+  const notice = document.getElementById('quota-notice');
+  const detail = document.getElementById('quota-notice-detail');
+  if (!notice || !detail) return;
+  const now = Date.now();
+  const dayStart = Math.floor(now / 86_400_000) * 86_400_000;
+  const freshUsage = latestUsage && new Date(latestUsage.windowEnd).getTime() > now;
+  const exhausted = freshUsage && Number(latestUsage.limit) > 0 && Number(latestUsage.rowsRead) >= Number(latestUsage.limit);
+  notice.hidden = !exhausted && quotaFailureAt < dayStart;
+  if (notice.hidden) return;
+  const counts = freshUsage
+    ? `账号已读 ${Number(latestUsage.rowsRead).toLocaleString('zh-CN')} / ${Number(latestUsage.limit).toLocaleString('zh-CN')} 行，TunnelWatch 本库 ${Number(latestUsage.databaseRowsRead || 0).toLocaleString('zh-CN')} 行。`
+    : '云端已确认今日读取额度耗尽。';
+  const reset = new Date(dayStart + 86_400_000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
+  detail.textContent = `${counts} 下次重置：${reset}（北京时间；UTC 00:00）。额度由账号内所有 D1 数据库共享，统计可能延迟。`;
+}
+
 function startUsageTimer() {
   loadUsage();
   if (usageRefreshTimer) return;
@@ -192,14 +223,18 @@ async function loadUsage() {
     if (!res.ok || !data || !data.ok) {
       throw new Error((data && data.error) || ('HTTP ' + res.status));
     }
-    const rowsRead = data.rowsRead | 0;
-    const limit    = data.limit    | 0;
+    const rowsRead = Number(data.rowsRead) || 0;
+    latestUsage = data;
+    renderQuotaNotice();
+    const limit    = Number(data.limit) || 0;
     const pct      = Math.max(0, Math.min(100, Number(data.pct) || 0));
     const resetsAt = data.resetsAt ? new Date(data.resetsAt) : null;
-    text.textContent = `${formatBig(rowsRead)} / ${formatBig(limit)} · ${pct.toFixed(1)}%`;
+    text.textContent = `账号 ${formatBig(rowsRead)} / ${formatBig(limit)} · ${pct.toFixed(1)}% · 余 ${formatBig(Math.max(0, limit - rowsRead))}`;
     text.title = [
-      `今日 D1 rowsRead: ${rowsRead.toLocaleString()} / ${limit.toLocaleString()}`,
+      `今日账号全部 D1 rowsRead: ${rowsRead.toLocaleString()} / ${limit.toLocaleString()}`,
+      `TunnelWatch 本库 rowsRead: ${Number(data.databaseRowsRead || 0).toLocaleString()}`,
       `rowsWritten: ${(data.rowsWritten || 0).toLocaleString()}`,
+      'Cloudflare 分析数据可能延迟，页面每 5 分钟刷新；余量不保证实时。',
       resetsAt ? `重置: ${resetsAt.toISOString().replace('T', ' ').slice(0, 16)} UTC` : '',
     ].filter(Boolean).join('\n');
     fill.style.width = pct + '%';
@@ -336,7 +371,9 @@ function updateChartTitles() {
 async function loadDevices() {
   try {
     const res = await fetch('/api/devices');
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
+    noteQuotaFailure(data);
+    if (!res.ok) throw new Error(data.message || `HTTP ${res.status}`);
     devices = (data && data.devices) || [];
     const sel = document.getElementById('device-select');
     sel.innerHTML = '';
@@ -384,6 +421,8 @@ async function loadDevices() {
     ]);
   } catch (e) {
     setFooter('加载设备列表失败: ' + e.message, false);
+    document.getElementById('device-select').innerHTML = '<option value="">暂时无法加载设备</option>';
+    document.getElementById('bill-list').innerHTML = `<p class="receipt-empty">暂时无法加载账本<br>${escapeHtml(e.message)}</p>`;
   }
 }
 
@@ -414,6 +453,10 @@ async function refreshHistory({ updateFooter = true } = {}) {
 }
 
 function updateRefreshFooter(results) {
+  if (quotaFailureAt >= Math.floor(Date.now() / 86_400_000) * 86_400_000) {
+    setFooter('云端读取受限 · 今日账号 D1 配额已满，见顶部说明', false);
+    return;
+  }
   // results: 每个 render 返回 true=已更新 / false=无变化/失败
   // "无变化"指服务端 304 命中(数据未变)→ render 函数早早 return false,DOM/Chart 不动
   const changed = results.filter(Boolean).length;
@@ -1652,8 +1695,11 @@ async function loadBills() {
   if (!currentDevice) return;
   try {
     const res = await fetch('/api/bills', { headers: { 'X-Device-Uuid': currentDevice } });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    bills = (await res.json()).bills || [];
+    const data = await res.json().catch(() => ({}));
+    noteQuotaFailure(data);
+    if (!res.ok) throw new Error(data.message || 'HTTP ' + res.status);
+    if (!Array.isArray(data.bills)) throw new Error('账本响应格式异常');
+    bills = data.bills;
     refreshPayerOptions();
     refreshPayerChips();
     applyClientFilter();

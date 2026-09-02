@@ -1,6 +1,6 @@
 // GET /api/usage
 //
-// 拉今天(UTC)该 D1 database 的 rowsRead / rowsWritten,前端 widget 用
+// 拉今天(UTC)账号总量及该 D1 database 的 rowsRead / rowsWritten,前端 widget 用
 // 来可视化 free plan 5M rows/day 配额余量。
 //
 // 走 Cloudflare GraphQL Analytics API(查 metrics 不消耗 D1 read 配额):
@@ -61,12 +61,17 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     query D1Usage($accountTag: String!, $databaseId: String!, $start: Date!, $end: Date!) {
       viewer {
         accounts(filter: { accountTag: $accountTag }) {
-          d1AnalyticsAdaptiveGroups(
+          accountUsage: d1AnalyticsAdaptiveGroups(
+            limit: 1
+            filter: { date_geq: $start, date_leq: $end }
+          ) {
+            sum { rowsRead rowsWritten }
+          }
+          databaseUsage: d1AnalyticsAdaptiveGroups(
             limit: 1
             filter: { date_geq: $start, date_leq: $end, databaseId: $databaseId }
           ) {
             sum { rowsRead rowsWritten }
-            dimensions { date }
           }
         }
       }
@@ -76,7 +81,8 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     accountTag: CF_ACCOUNT_ID,
     databaseId: D1_DATABASE_ID,
     start: fmt(startDate),
-    end: fmt(endDate),
+    // date_leq 是闭区间，起止都用今天；不要意外把明天纳入统计。
+    end: fmt(startDate),
   };
 
   let resp: Response;
@@ -100,7 +106,10 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     data?: {
       viewer: {
         accounts: Array<{
-          d1AnalyticsAdaptiveGroups: Array<{
+          accountUsage: Array<{
+            sum: { rowsRead: number; rowsWritten: number };
+          }>;
+          databaseUsage: Array<{
             sum: { rowsRead: number; rowsWritten: number };
           }>;
         }>;
@@ -111,8 +120,12 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
   if (body.errors && body.errors.length) {
     return json({ ok: false, code: 'graphql_error', error: 'GraphQL error: ' + body.errors.map((e) => e.message).join('; ') }, 502);
   }
-  const groups = body.data?.viewer?.accounts?.[0]?.d1AnalyticsAdaptiveGroups || [];
-  const sum = groups[0]?.sum || { rowsRead: 0, rowsWritten: 0 };
+  const account = body.data?.viewer?.accounts?.[0];
+  if (!account || !Array.isArray(account.accountUsage) || !Array.isArray(account.databaseUsage)) {
+    return json({ ok: false, code: 'graphql_missing_data', error: 'Cloudflare 未返回账号用量，无法确认余量' }, 502);
+  }
+  const sum = account.accountUsage[0]?.sum || { rowsRead: 0, rowsWritten: 0 };
+  const databaseSum = account.databaseUsage[0]?.sum || { rowsRead: 0, rowsWritten: 0 };
   const rowsRead = sum.rowsRead || 0;
   const rowsWritten = sum.rowsWritten || 0;
 
@@ -120,6 +133,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     ok: true,
     rowsRead,
     rowsWritten,
+    scope: 'account',
+    databaseRowsRead: databaseSum.rowsRead,
+    databaseRowsWritten: databaseSum.rowsWritten,
+    remaining: Math.max(0, FREE_PLAN_DAILY_READ_LIMIT - rowsRead),
+    observedAt: now.toISOString(),
     limit: FREE_PLAN_DAILY_READ_LIMIT,
     pct: Math.min(100, (rowsRead / FREE_PLAN_DAILY_READ_LIMIT) * 100),
     windowStart: startDate.toISOString(),
@@ -127,7 +145,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     // 当 5M 用满到 100% 时,以用户最近的 read 速率推算还要多久触顶;
     // 没有历史数据(刚启动)就 null,前端 widget 显示"—"
     resetsAt: endDate.toISOString(),
-  }), 300);
+  }), Math.max(1, Math.min(300, Math.floor((endDate.getTime() - now.getTime()) / 1000))));
 };
 
 function json(obj: unknown, status = 200): Response {

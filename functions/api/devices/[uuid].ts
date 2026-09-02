@@ -74,10 +74,11 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     return json({ error: 'device not found' }, 404);
   }
 
-  // 清掉 GET /api/devices 的 in-memory cache,让下次 GET 看到新的 quiet hours。
-  // (edge cache 留 600s TTL — 该 endpoint 走 cachedD1 时会先 match edge hit 然后
-  // 提前返回,所以 in-memory 一旦 invalidate 成功,edge miss 路径才会被走到。)
+  // GET 会先命中边缘缓存；只清进程内缓存会让刚保存的窗口被旧值覆盖。
+  // 清理当前 PoP 的标准列表 URL。其他 PoP 的副本仍受现有 TTL 约束，
+  // 此处不是全局即时一致性保证。
   invalidateKey(DEVICES_CACHE_KEY);
+  await caches.default.delete(new Request(new URL('/api/devices', context.request.url)));
 
   // 7) 回读,组装响应
   const row = await context.env.DB

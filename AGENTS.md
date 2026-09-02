@@ -91,12 +91,12 @@ npm run db:query "SELECT 1"  # 查本地 D1
    - Account Resources: Include → 当前账号
 3. Create → 复制 token
 4. `wrangler pages secret put CF_API_TOKEN` → 粘贴 token
-5. **不需要重新 deploy**,刷新页面 widget 立即生效
+5. **必须重新部署**，新部署才会绑定 Secret。更新 APP_VERSION 后运行 `npx wrangler pages deploy public --project-name tunnelwatch --branch main`，再验证 `/api/usage` 和页面。不要把 Token 粘贴到聊天、代码或日志。
 
 `wrangler.toml` 里 `CF_ACCOUNT_ID` / `D1_DATABASE_ID` 已预填,不是 secret。改 ID 会断 widget。
 
 阈值说明:
-- 5M/day 是 D1 free plan **账号级**总配额(不是单库)。如果账号下还有其他 D1,这个数字会偏低 — 解决方式:在 wrangler.toml 的 `D1_DATABASE_ID` 改用账号聚合(目前 widget 只查这一个 db,需要看其他 db 时改后端 filter)
+- 5M/day 是 D1 free plan **账号级**总配额(不是单库)。widget 查询账号聚合总量计算余量，另返回 `databaseRowsRead` 显示本库用量；不要把其他库排除在账号额度外。分析数据可能延迟，零余量以外也不代表实时可用保证。
 - 升级 Workers Paid($5/月)→ 25B+ rows/月,widget 会显示个位数百分比,基本不会变红
 
 ## 不要做
