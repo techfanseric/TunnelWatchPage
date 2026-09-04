@@ -11,7 +11,7 @@ const LATEST_REFRESH_MS = 2 * 60_000;
 const HISTORY_REFRESH_MS = 15 * 60_000;
 // 发版标签 — 每次 `wrangler pages deploy` 前手动 bump 一下,刷新页面看 header 是否更新 → 确认 deploy 生效
 // 格式:YYYY.MM.DD-HHMM(本地时间),不需要严格 semver,关键是要"每次发版都换字符串"
-const APP_VERSION = '2026.09.04-2349';
+const APP_VERSION = '2026.09.04-2353';
 // 世界地图 TopoJSON 来源(importmap 把 d3-geo/topojson-client 解析到 jsdelivr ESM,JSON 走 fetch 避免 MIME 限制)
 const WORLD_TOPO_URL = '/vendor/world-50m.json';
 // Chart.js 不解析 CSS var(),要写 hex
@@ -584,9 +584,7 @@ async function renderMirror() {
     if (s.expireAtMillis) {
       parts.push(`<span>到期 ${formatDate(s.expireAtMillis)}</span>`);
     }
-    if (s.subLoadSummary) {
-      parts.push(`<span>${escapeHtml(s.subLoadSummary)}</span>`);
-    }
+    // 注意:subLoadSummary("12/12 订阅源 OK")已在上方 mirror-sub-row 展示,这里不再重复
     meta.innerHTML = parts.length ? parts.join(' · ') : '<span class="empty">—</span>';
     return true;
   } catch (e) {
