@@ -18,9 +18,12 @@ TunnelWatch 的可视化端,Cloudflare Pages + D1 部署。Agent 端(Android)在
 
 正确流程:
 1. 改完 UI / 改完数据查询 / 改完图渲染逻辑
-2. `npm run db:pull` 拉远程 D1 真数据到本地
-3. `npm run dev` 起本地服务
-4. 截图 / 浏览器自测 / Playwright 跑回归
+2. `npm run dev` 起本地服务(默认:本地页面 + /api 代理到线上,直接是真数据)
+3. 截图 / 浏览器自测 / Playwright 跑回归
+
+注意:`npm run dev` 模式下 /api 跑的是**线上已部署的 Functions**。改了 `functions/` 的代码才需要
+`npm run dev:local`(wrangler pages dev + 本地 D1,先 `npm run db:pull` 拉真数据)验证。
+`db:pull` 因此只在用 `dev:local` 前需要,日常 UI 开发不用跑。
 
 `db:seed` 只在**离线 / 无 wrangler 远程权限 / 给截图补点数据**时用,且要在 PR/commit message 里说明。
 
@@ -55,8 +58,12 @@ deploy 完成后,人工/截图自检:打开线上页面,确认 brand-version 文
 ```bash
 npm install
 npm run db:init && npm run db:migrate:billing && npm run db:migrate:filter-share  # 首次
-npm run db:pull          # 每次开发前:拉远程 D1 → 本地 D1
-npm run dev              # wrangler pages dev 127.0.0.1:8788
+npm run dev              # 默认入口:本地页面 + /api 代理到线上 127.0.0.1:8788
+                         # (scripts/dev-remote.mjs;直接读线上真数据,无需 db:pull。
+                         #  ⚠️ 写操作会落线上库,别提交表单)
+npm run dev:local        # 改了 functions/ 时用:wrangler pages dev + 本地 D1(先 db:pull)
+                         #  注:wrangler v4 remote bindings 在 pages dev 下实测挂起/INTERNAL_ERROR,勿用
+npm run db:pull          # dev:local 前:拉远程 D1 → 本地 D1
 node shoot.mjs URL OUT [WIDTH] [24h|7d|30d] [true|false] [TIMEOUT] [HEIGHT]  # Playwright 截图
 npm run db:query "SELECT 1"  # 查本地 D1
 ```
@@ -67,7 +74,8 @@ npm run db:query "SELECT 1"  # 查本地 D1
 - `public/index.html` + `style.css` — UI 骨架 + 样式
 - `migrations/000X_*.sql` — D1 schema 演进(已部署,不要破坏)
 - `functions/` — Cloudflare Pages Functions(API 入口,`/api/devices` 等)
-- `scripts/pull-remote.mjs` — 拉真数据(新,见上)
+- `scripts/dev-remote.mjs` — 默认 dev server(本地静态 + /api 代理线上,见命令速查)
+- `scripts/pull-remote.mjs` — 拉真数据到本地 D1(仅 dev:local 前需要)
 - `scripts/seed.mjs` — **deprecated**,仅离线兜底
 - `wrangler.toml` — D1 binding(`database_id` 是远程实例;本地 dev 自动用 `.wrangler/state/v3/d1/`)
 

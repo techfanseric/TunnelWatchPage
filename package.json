@@ -5,7 +5,8 @@
   "private": true,
   "description": "TunnelWatch telemetry viewer — Cloudflare Pages + D1",
   "scripts": {
-    "dev": "wrangler pages dev public --port 8788 --ip 127.0.0.1",
+    "dev": "node scripts/dev-remote.mjs",
+    "dev:local": "wrangler pages dev public --port 8788 --ip 127.0.0.1",
     "db:init": "wrangler d1 execute tunnelwatch --local --file=migrations/0001_init.sql",
     "db:migrate:billing": "wrangler d1 execute tunnelwatch --local --file=migrations/0002_billing.sql",
     "db:migrate:filter-share": "wrangler d1 execute tunnelwatch --local --file=migrations/0003_bill_share_filters.sql",
