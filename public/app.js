@@ -11,7 +11,7 @@ const LATEST_REFRESH_MS = 2 * 60_000;
 const HISTORY_REFRESH_MS = 15 * 60_000;
 // 发版标签 — 每次 `wrangler pages deploy` 前手动 bump 一下,刷新页面看 header 是否更新 → 确认 deploy 生效
 // 格式:YYYY.MM.DD-HHMM(本地时间),不需要严格 semver,关键是要"每次发版都换字符串"
-const APP_VERSION = '2026.09.02-1200';
+const APP_VERSION = '2026.09.04-1104';
 // 世界地图 TopoJSON 来源(importmap 把 d3-geo/topojson-client 解析到 jsdelivr ESM,JSON 走 fetch 避免 MIME 限制)
 const WORLD_TOPO_URL = '/vendor/world-50m.json';
 // Chart.js 不解析 CSS var(),要写 hex
@@ -1946,11 +1946,15 @@ function perUidLineStats(lines, probeLines) {
   // 用 probe 数据(更新);没有就退化到 lines
   const stats = {};
   (probeLines || lines).forEach(l => {
-    const uid = (l.uidTag || '').split(',')[0].trim();
-    if (!uid) return;
-    if (!stats[uid]) stats[uid] = { ok: 0, total: 0 };
-    stats[uid].total++;
-    if (l.probe?.status === 'OK') stats[uid].ok++;
+    const isOk = l.probe?.status === 'OK';
+    // 共享节点计入每个 uid,与 agent 端 uidStats / widget linesByUid 口径一致
+    (l.uidTag || '').split(',').forEach(tag => {
+      const uid = tag.trim();
+      if (!uid) return;
+      if (!stats[uid]) stats[uid] = { ok: 0, total: 0 };
+      stats[uid].total++;
+      if (isOk) stats[uid].ok++;
+    });
   });
   return stats;
 }

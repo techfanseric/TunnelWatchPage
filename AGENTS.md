@@ -4,7 +4,7 @@
 
 ## 项目是什么
 
-TunnelWatch 的可视化端,Cloudflare Pages + D1 部署。Agent 端(Android,不在此 repo)上传订阅源快照,这里渲染账单、节点健康度、续费建议、世界地图、流量曲线。
+TunnelWatch 的可视化端,Cloudflare Pages + D1 部署。Agent 端(Android)在姊妹仓库 **`~/TunnelWatch`**(本机路径,不在此 repo),上传订阅源快照,这里渲染账单、节点健康度、续费建议、世界地图、流量曲线。
 
 - 设备维度数据:`devices` / `snapshots` 表,1 对多
 - 账单维度数据:`bills` / `bill_share_filters` 表,按 owner 隔离(预留多用户)
