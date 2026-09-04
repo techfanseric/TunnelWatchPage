@@ -11,7 +11,7 @@ const LATEST_REFRESH_MS = 2 * 60_000;
 const HISTORY_REFRESH_MS = 15 * 60_000;
 // 发版标签 — 每次 `wrangler pages deploy` 前手动 bump 一下,刷新页面看 header 是否更新 → 确认 deploy 生效
 // 格式:YYYY.MM.DD-HHMM(本地时间),不需要严格 semver,关键是要"每次发版都换字符串"
-const APP_VERSION = '2026.09.04-2353';
+const APP_VERSION = '2026.09.05-0004';
 // 世界地图 TopoJSON 来源(importmap 把 d3-geo/topojson-client 解析到 jsdelivr ESM,JSON 走 fetch 避免 MIME 限制)
 const WORLD_TOPO_URL = '/vendor/world-50m.json';
 // Chart.js 不解析 CSS var(),要写 hex
@@ -716,6 +716,25 @@ async function renderRegionCard({ force = false } = {}) {
           ? (slow.latency / Math.max(1, fast.latency)).toFixed(1) + 'x'
           : '—';
         const p50Title = v.p50 != null ? v.p50 + 'ms' : '—';
+        // 差距条保持渐变,但渐变的颜色停靠点锚定绝对延迟刻度(<50 绿 / <150 黄 / ≥150 红),
+        // 而不是行内相对位置 — 否则 "5─12ms" 和 "4─760ms" 两行会渲染出同样的绿→红渐变,
+        // 让人误以为 50ms 的标记比 10ms 的还快。阈值(50/150ms)附近留过渡带,视觉仍是渐变。
+        const range = slow.latency - fast.latency;
+        const toPct = (t) => Math.max(0, Math.min(100, ((t - fast.latency) / range) * 100));
+        const wPct = Math.min(10, Math.max(2, (30 / range) * 100));  // 过渡带宽 ≈30ms
+        const pA = toPct(50);
+        const pB = toPct(150);
+        const stops = [`${latencyColor(fast.latency)} 0%`];
+        if (pA > 0 && pA < 100) {
+          stops.push(`${COLORS.ok} ${Math.max(0, pA - wPct).toFixed(1)}%`);
+          stops.push(`${COLORS.warn} ${Math.min(100, pA + wPct).toFixed(1)}%`);
+        }
+        if (pB > 0 && pB < 100) {
+          stops.push(`${COLORS.warn} ${Math.max(0, pB - wPct).toFixed(1)}%`);
+          stops.push(`${COLORS.err} ${Math.min(100, pB + wPct).toFixed(1)}%`);
+        }
+        stops.push(`${latencyColor(slow.latency)} 100%`);
+        const barBg = `linear-gradient(to right, ${stops.join(', ')})`;
         // ⚡/🐌 数字按延迟刻度着色(<50 绿 / <150 黄 / ≥150 红),不再固定绿/红
         fsBlock = `
           <div class="rr-fs-line">
@@ -727,7 +746,7 @@ async function renderRegionCard({ force = false } = {}) {
             <span class="fs-ratio">▲ ${ratio}</span>
           </div>
           <div class="fs-bar-wrap">
-            <span class="fs-bar" title="p50 ${p50Title} 落在 [${fast.latency}, ${slow.latency}] ms">
+            <span class="fs-bar" style="background:${barBg}" title="p50 ${p50Title} 落在 [${fast.latency}, ${slow.latency}] ms">
               ${v.p50 != null ? `<span class="marker" style="left:${markerPct.toFixed(0)}%"></span>` : ''}
             </span>
             <span class="fs-range">${fast.latency}─${slow.latency} ms</span>
@@ -942,14 +961,14 @@ async function renderRenewalCard({ force = false } = {}) {
         : `快到期 · 到期天数升序 · ${label} 聚合`;
     }
     // 名称列宽自适应:按当前列表最长名字的显示宽度估算(CJK/emoji 记 2,其余记 1),
-    // 所有行共用同一宽度 — 既不留固定 88px 的空白,也保证分数列上下对齐
+    // 所有行共用同一宽度 — 贴内容走(13px 字体下 1 单位 ≈ 6.5px),不留多余空白
     const nameUnits = (t) => {
       let w = 0;
       for (const ch of String(t ?? '')) w += /[\u2E80-\u9FFF\uF900-\uFAFF\uFF00-\uFFEF\u2600-\u27BF\u{1F000}-\u{1FAFF}]/u.test(ch) ? 2 : 1;
       return w;
     };
-    const nameColW = Math.max(40, Math.min(140,
-      Math.max(0, ...sortedScores.map(s => nameUnits(s.sub))) * 7 + 12));
+    const nameColW = Math.max(32, Math.min(140,
+      Math.round(Math.max(0, ...sortedScores.map(s => nameUnits(s.sub))) * 6.5) + 4));
     document.getElementById('renewal-list').innerHTML = sortedScores.map(s => {
       const score = s.score ?? 0;
       const okPct = (s.okRate * 100).toFixed(0) + '%';
@@ -965,7 +984,7 @@ async function renderRenewalCard({ force = false } = {}) {
       const unique = (s.uniqueValue || []);
       // 浅灰底通栏 + 居中,让"补 XX / YY"在视觉上成为一个整块提示条
       const uniqueLine = unique.length > 0
-        ? `<div style="margin-top:6px;padding:4px 8px;font-size:11px;color:${COLORS.primary};line-height:1.4;background:var(--border);border-radius:6px;text-align:center;">
+        ? `<div style="margin-top:6px;padding:4px 8px;font-size:11px;color:${COLORS.primary};line-height:1.4;background:#F3F4F6;border-radius:6px;text-align:center;">
              补 ${unique.map(escapeHtml).join(' / ')}
            </div>`
         : '';
@@ -977,11 +996,9 @@ async function renderRenewalCard({ force = false } = {}) {
           <div style="flex:0 0 ${nameColW}px;min-width:0;">
             <div style="font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${escapeHtml(s.sub)}">${escapeHtml(s.sub)}</div>
           </div>
-          <div style="flex:0 0 64px;text-align:center;">
+          <div style="flex:0 0 40px;text-align:center;">
+            <!-- 分数本身已按建议等级着色,不再画进度条(信息重复) -->
             <div style="font-size:20px;font-weight:700;color:${renewColor[s.recommend] || COLORS.secondary};font-variant-numeric:tabular-nums;line-height:1;">${score}</div>
-            <div style="height:4px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:4px;">
-              <div style="height:100%;background:${renewColor[s.recommend] || COLORS.secondary};width:${Math.max(0, Math.min(100, score))}%;"></div>
-            </div>
           </div>
           <div style="flex:0 0 56px;text-align:center;">
             <span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;color:#FFFFFF;background:${renewColor[s.recommend] || COLORS.secondary};">${renewBadge[s.recommend] || '?'}</span>
