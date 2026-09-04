@@ -11,7 +11,7 @@ const LATEST_REFRESH_MS = 2 * 60_000;
 const HISTORY_REFRESH_MS = 15 * 60_000;
 // 发版标签 — 每次 `wrangler pages deploy` 前手动 bump 一下,刷新页面看 header 是否更新 → 确认 deploy 生效
 // 格式:YYYY.MM.DD-HHMM(本地时间),不需要严格 semver,关键是要"每次发版都换字符串"
-const APP_VERSION = '2026.09.04-1104';
+const APP_VERSION = '2026.09.04-2349';
 // 世界地图 TopoJSON 来源(importmap 把 d3-geo/topojson-client 解析到 jsdelivr ESM,JSON 走 fetch 避免 MIME 限制)
 const WORLD_TOPO_URL = '/vendor/world-50m.json';
 // Chart.js 不解析 CSS var(),要写 hex
@@ -30,6 +30,14 @@ const CHART_PALETTE = [
   COLORS.primary, COLORS.ok, COLORS.warn, COLORS.err, '#7C3AED',
   '#06B6D4', '#EC4899', '#84CC16', '#F97316', '#6366F1'
 ];
+
+// 延迟刻度配色:<50ms 绿 / <150ms 黄 / ≥150ms 红(与世界地图 colorByP50 同一刻度)
+function latencyColor(ms) {
+  if (ms == null || !Number.isFinite(ms)) return COLORS.secondary;
+  if (ms < 50) return COLORS.ok;
+  if (ms < 150) return COLORS.warn;
+  return COLORS.err;
+}
 
 // ---------- 状态 ----------
 let currentDevice = null;     // uuid
@@ -691,7 +699,15 @@ async function renderRegionCard({ force = false } = {}) {
       const fast = v.fastest && typeof v.fastest === 'object' ? v.fastest : null;
       const slow = v.slowest && typeof v.slowest === 'object' ? v.slowest : null;
       let fsBlock = '';
-      if (fast && slow) {
+      // 单点:fastest/slowest 指向同一个节点(只有 1 个 OK 节点),不区分 ⚡/🐌,只显示一个数字
+      const singlePoint = fast && slow && fast.latency === slow.latency && fast.name === slow.name;
+      if (singlePoint) {
+        fsBlock = `
+          <div class="rr-fs-line">
+            <span class="fs-fast" style="color:${latencyColor(fast.latency)}">${fast.latency}ms</span>
+            <span class="fs-name" title="${escapeHtml(fast.name)}">${escapeHtml(fast.name)}</span>
+          </div>`;
+      } else if (fast && slow) {
         // 差距条:p50 在 [fastest, slowest] 之间的位置百分比
         let markerPct = 0;
         if (v.p50 != null && slow.latency > fast.latency) {
@@ -702,12 +718,13 @@ async function renderRegionCard({ force = false } = {}) {
           ? (slow.latency / Math.max(1, fast.latency)).toFixed(1) + 'x'
           : '—';
         const p50Title = v.p50 != null ? v.p50 + 'ms' : '—';
+        // ⚡/🐌 数字按延迟刻度着色(<50 绿 / <150 黄 / ≥150 红),不再固定绿/红
         fsBlock = `
           <div class="rr-fs-line">
-            <span class="fs-fast">⚡ ${fast.latency}ms</span>
+            <span class="fs-fast" style="color:${latencyColor(fast.latency)}">⚡ ${fast.latency}ms</span>
             <span class="fs-name" title="${escapeHtml(fast.name)}">${escapeHtml(fast.name)}</span>
             <span style="color:var(--secondary,#888);">·</span>
-            <span class="fs-slow">🐌 ${slow.latency}ms</span>
+            <span class="fs-slow" style="color:${latencyColor(slow.latency)}">🐌 ${slow.latency}ms</span>
             <span class="fs-name" title="${escapeHtml(slow.name)}">${escapeHtml(slow.name)}</span>
             <span class="fs-ratio">▲ ${ratio}</span>
           </div>
@@ -718,7 +735,7 @@ async function renderRegionCard({ force = false } = {}) {
             <span class="fs-range">${fast.latency}─${slow.latency} ms</span>
           </div>`;
       } else {
-        // 全失败 / 单节点(没有差异)→ 只显示 "—"
+        // 全失败(0 OK)→ 只显示 "—"
         fsBlock = `<div class="rr-fs-line"><span class="fs-ratio">—</span></div>`;
       }
 
@@ -926,6 +943,15 @@ async function renderRenewalCard({ force = false } = {}) {
         ? `推荐高 · 综合分降序 · ${label} 聚合`
         : `快到期 · 到期天数升序 · ${label} 聚合`;
     }
+    // 名称列宽自适应:按当前列表最长名字的显示宽度估算(CJK/emoji 记 2,其余记 1),
+    // 所有行共用同一宽度 — 既不留固定 88px 的空白,也保证分数列上下对齐
+    const nameUnits = (t) => {
+      let w = 0;
+      for (const ch of String(t ?? '')) w += /[\u2E80-\u9FFF\uF900-\uFAFF\uFF00-\uFFEF\u2600-\u27BF\u{1F000}-\u{1FAFF}]/u.test(ch) ? 2 : 1;
+      return w;
+    };
+    const nameColW = Math.max(40, Math.min(140,
+      Math.max(0, ...sortedScores.map(s => nameUnits(s.sub))) * 7 + 12));
     document.getElementById('renewal-list').innerHTML = sortedScores.map(s => {
       const score = s.score ?? 0;
       const okPct = (s.okRate * 100).toFixed(0) + '%';
@@ -939,32 +965,35 @@ async function renderRenewalCard({ force = false } = {}) {
         ? COLORS.warn
         : (s.daysToExpire != null && s.daysToExpire < 0 ? COLORS.err : COLORS.secondary);
       const unique = (s.uniqueValue || []);
+      // 浅灰底通栏 + 居中,让"补 XX / YY"在视觉上成为一个整块提示条
       const uniqueLine = unique.length > 0
-        ? `<div style="margin-top:4px;font-size:11px;color:${COLORS.primary};line-height:1.4;">
+        ? `<div style="margin-top:6px;padding:4px 8px;font-size:11px;color:${COLORS.primary};line-height:1.4;background:var(--border);border-radius:6px;text-align:center;">
              补 ${unique.map(escapeHtml).join(' / ')}
            </div>`
         : '';
+      // uniqueLine 拉通显示在整行下方,不挤在右侧单元格里(避免把该列撑得很高)
       return `<div class="renewal-row" style="
-        display:flex;align-items:center;gap:10px;
         padding:10px 4px;border-bottom:1px solid var(--border);
       ">
-        <div style="flex:0 0 88px;min-width:0;">
-          <div style="font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${escapeHtml(s.sub)}">${escapeHtml(s.sub)}</div>
-        </div>
-        <div style="flex:0 0 64px;text-align:center;">
-          <div style="font-size:20px;font-weight:700;color:${renewColor[s.recommend] || COLORS.secondary};font-variant-numeric:tabular-nums;line-height:1;">${score}</div>
-          <div style="height:4px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:4px;">
-            <div style="height:100%;background:${renewColor[s.recommend] || COLORS.secondary};width:${Math.max(0, Math.min(100, score))}%;"></div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div style="flex:0 0 ${nameColW}px;min-width:0;">
+            <div style="font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${escapeHtml(s.sub)}">${escapeHtml(s.sub)}</div>
+          </div>
+          <div style="flex:0 0 64px;text-align:center;">
+            <div style="font-size:20px;font-weight:700;color:${renewColor[s.recommend] || COLORS.secondary};font-variant-numeric:tabular-nums;line-height:1;">${score}</div>
+            <div style="height:4px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:4px;">
+              <div style="height:100%;background:${renewColor[s.recommend] || COLORS.secondary};width:${Math.max(0, Math.min(100, score))}%;"></div>
+            </div>
+          </div>
+          <div style="flex:0 0 56px;text-align:center;">
+            <span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;color:#FFFFFF;background:${renewColor[s.recommend] || COLORS.secondary};">${renewBadge[s.recommend] || '?'}</span>
+          </div>
+          <div style="flex:1;min-width:0;font-size:11px;color:var(--meta);line-height:1.5;">
+            <div>OK ${okPct} · p50 ${p50} · ${s.nodeCount} 节点 · ${s.regionCount} 地区</div>
+            <div style="margin-top:2px;color:${expireColor};">到期 ${escapeHtml(expireTxt)}</div>
           </div>
         </div>
-        <div style="flex:0 0 56px;text-align:center;">
-          <span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;color:#FFFFFF;background:${renewColor[s.recommend] || COLORS.secondary};">${renewBadge[s.recommend] || '?'}</span>
-        </div>
-        <div style="flex:1;min-width:0;font-size:11px;color:var(--meta);line-height:1.5;">
-          <div>OK ${okPct} · p50 ${p50} · ${s.nodeCount} 节点 · ${s.regionCount} 地区</div>
-          <div style="margin-top:2px;color:${expireColor};">到期 ${escapeHtml(expireTxt)}</div>
-          ${uniqueLine}
-        </div>
+        ${uniqueLine}
       </div>`;
     }).join('');
     return true;
@@ -1459,9 +1488,8 @@ async function renderWorldMapCard() {
       return { fill: '#9CA3AF', title: '不可用' };
     }
     if (v.p50 == null) return { fill: '#9CA3AF', title: '不可用' };
-    if (v.p50 < 50) return { fill: COLORS.ok, title: `${v.p50}ms · 优` };
-    if (v.p50 < 150) return { fill: COLORS.warn, title: `${v.p50}ms · 中` };
-    return { fill: COLORS.err, title: `${v.p50}ms · 差` };
+    const tier = v.p50 < 50 ? '优' : (v.p50 < 150 ? '中' : '差');
+    return { fill: latencyColor(v.p50), title: `${v.p50}ms · ${tier}` };
   };
 
   // 4. 把 regionStats key("🇭🇰 HK" 等)归一化成 {ISO → 第一个匹配 region(其余合并)}

@@ -230,6 +230,7 @@
       color: var(--meta, #666666);
       flex-wrap: wrap;
     }
+    /* 颜色由 app.js 按延迟刻度 inline 注入(latencyColor),这里的 color 只是兜底 */
     .region-row .fs-fast { color: var(--ok, #22C55E); font-weight: 600; }
     .region-row .fs-slow { color: var(--err, #EF4444); font-weight: 600; }
     .region-row .fs-name {
